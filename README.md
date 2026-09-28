@@ -1,17 +1,17 @@
-# sprint_wash
+# Aplicación Móvil - Sistema Carwash
 
-A new Flutter project.
+Aplicación nativa de uso interno diseñada para los operarios del Carwash. Optimiza los tiempos de respuesta permitiendo cambiar los estados de los vehículos (Pendiente, En Proceso, Terminado) directamente desde el patio de lavado mediante una interfaz rápida y de alto contraste.
 
-## Getting Started
+## Tecnologías Utilizadas
+* **Framework:** Flutter
+* **Lenguaje:** Dart
+* **Peticiones HTTP:** Paquete `http` para consumo de API REST.
 
-This project is a starting point for a Flutter application.
+## Encargado de Desarrollo
+* **Edenilson Escamilla** - Desarrollador Frontend Móvil
 
-A few resources to get you started if this is your first Flutter project:
-
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
-
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+## Uso en entorno local (Desarrollo)
+1. Clonar el repositorio.
+2. Ejecutar `flutter pub get` para obtener las dependencias.
+3. Conectar dispositivo físico o emulador Android.
+4. Ejecutar con: `flutter run`
