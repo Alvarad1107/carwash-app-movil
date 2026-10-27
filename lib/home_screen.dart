@@ -16,8 +16,10 @@ class VehiculoPatio {
   final String telefonoCliente;
   final String bahia;
   final String servicio;
+  final double montoNumerico;
   final String totalPagar;
   int fase;
+  bool pagado;
 
   VehiculoPatio({
     required this.ordenId,
@@ -32,65 +34,13 @@ class VehiculoPatio {
     required this.telefonoCliente,
     required this.bahia,
     required this.servicio,
+    required this.montoNumerico,
     required this.totalPagar,
     this.fase = 0,
+    this.pagado = false,
   });
 
-  String get nombreCompletoCarro => '$marca $modelo';
-
-  factory VehiculoPatio.fromJson(Map<String, dynamic> json, int index) {
-    final estadoStr = (json['estado'] ?? 'Pendiente').toString().toLowerCase();
-    int fase = 0;
-    if (estadoStr.contains('proceso')) fase = 1;
-    if (estadoStr.contains('terminado') ||
-        estadoStr.contains('listo') ||
-        estadoStr.contains('entregado')) {
-      fase = 2;
-    }
-
-    final catId = json['categoria_vehiculo_id'];
-    String categoriaNombre = (json['categoria'] ?? '').toString();
-    if (categoriaNombre.isEmpty) {
-      if (catId == 1) {
-        categoriaNombre = 'Sedan';
-      } else if (catId == 2) {
-        categoriaNombre = 'Pick Up';
-      } else if (catId == 3) {
-        categoriaNombre = 'Carros Medianos';
-      } else if (catId == 4) {
-        categoriaNombre = 'Carros Grandes';
-      } else if (catId == 5) {
-        categoriaNombre = 'Microbus';
-      } else {
-        categoriaNombre = 'Sedan';
-      }
-    }
-
-    final precioRaw = json['total_pagar'] ?? json['subtotal'] ?? '19.00';
-
-    return VehiculoPatio(
-      ordenId: json['orden_id'] ?? json['id'] ?? (index + 1),
-      vehiculoId: json['vehiculo_id'] ?? json['id'] ?? (index + 1),
-      placa: (json['placa'] ?? 'SIN-PLACA').toString(),
-      marca: (json['marca'] ?? 'Toyota').toString(),
-      modelo: (json['modelo'] ?? 'Corolla').toString(),
-      color: (json['color'] ?? 'Rojo').toString(),
-      categoria: categoriaNombre,
-      cliente: (json['nombre_completo'] ??
-              json['cliente'] ??
-              'Cliente Sprint Wash')
-          .toString(),
-      correoCliente: (json['correo'] ?? 'cliente@sprintwash.com').toString(),
-      telefonoCliente: (json['telefono'] ?? '7000-0000').toString(),
-      bahia: json['bahia_id'] != null
-          ? 'Bahia ${json['bahia_id']}'
-          : (json['bahia'] ?? 'Bahia 1').toString(),
-      servicio: (json['servicio'] ?? 'Lavado Basico + Lavado de Motor')
-          .toString(),
-      totalPagar: '\$$precioRaw',
-      fase: fase,
-    );
-  }
+  String get nombreCompletoCarro => '$marca $modelo'.trim();
 }
 
 class HomeScreen extends StatefulWidget {
@@ -103,6 +53,7 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   static const Color kRoyalBlue = Color(0xFF1422B8);
 
+  // Se puede cambiar desde el ícono de engranaje en la pestaña "Perfil" por la IP de tu PC o VPS
   String _apiUrl = 'http://10.0.2.2:8000';
   bool _cargandoApi = false;
   bool _conectadoConApi = false;
@@ -111,21 +62,35 @@ class _HomeScreenState extends State<HomeScreen> {
   String _busqueda = '';
   String _filtroControl = 'Todos';
 
+  double _totalComisionesOperarios = 0.0;
+  double _totalCobradoHoy = 0.0;
+  int _cantidadLavadosComision = 0;
+
   static const List<String> _nombresFase = [
     'Pendiente',
     'En proceso',
     'Terminado'
   ];
+
+  // Nombres exactos que espera el endpoint PATCH /ordenes/{id}/estado en FastAPI
+  static const List<String> _estadosApi = [
+    'Pendiente',
+    'En proceso',
+    'Listo para entrega'
+  ];
+
   static const List<Color> _coloresFase = [
     Color(0xFFF59E0B),
     Color(0xFF2563EB),
     Color(0xFF16A34A),
   ];
+
   static const List<Color> _fondosFase = [
     Color(0xFFFEF3C7),
     Color(0xFFDBEAFE),
     Color(0xFFDCFCE7),
   ];
+
   static const List<IconData> _iconosFase = [
     Icons.hourglass_top_rounded,
     Icons.autorenew_rounded,
@@ -142,7 +107,7 @@ class _HomeScreenState extends State<HomeScreen> {
     for (int i = 1; i <= _totalBahias; i++) {
       if (!_bahiaOcupada(i)) return i;
     }
-    return null;
+    return 1;
   }
 
   List<VehiculoPatio> _vehiculos = [
@@ -153,14 +118,15 @@ class _HomeScreenState extends State<HomeScreen> {
       marca: 'Toyota',
       modelo: 'Corolla',
       color: 'Rojo',
-      categoria: 'Sedan',
-      cliente: 'Jualian Alexander Alvarador Moreno',
+      categoria: 'Sedán',
+      cliente: 'Julian Alexander Alvarado Moreno',
       correoCliente: 'alvaradomaster1107@gmail.com',
       telefonoCliente: '7898-9877',
       bahia: 'Bahia 1',
-      servicio: 'Lavado Basico + Lavado de Motor',
+      servicio: 'Orden de Lavado',
+      montoNumerico: 19.00,
       totalPagar: '\$19.00',
-      fase: 0,
+      fase: 2,
     ),
     VehiculoPatio(
       ordenId: 2,
@@ -171,10 +137,11 @@ class _HomeScreenState extends State<HomeScreen> {
       color: 'Blanco',
       categoria: 'Pick Up',
       cliente: 'Erick Anibal Herrera Guevara',
-      correoCliente: 'erickherrerashh.@gmail.com',
-      telefonoCliente: '63100933',
+      correoCliente: 'erickherrerashh@gmail.com',
+      telefonoCliente: '6310-0933',
       bahia: 'Bahia 2',
-      servicio: 'Lavado Basico (Pick Up)',
+      servicio: 'Orden de Lavado',
+      montoNumerico: 8.00,
       totalPagar: '\$8.00',
       fase: 1,
     ),
@@ -190,7 +157,8 @@ class _HomeScreenState extends State<HomeScreen> {
       correoCliente: 'bescamillarios12@gmail.com',
       telefonoCliente: '7857-4566',
       bahia: 'Bahia 3',
-      servicio: 'Lavado Basico + Lavado de Motor',
+      servicio: 'Orden de Lavado',
+      montoNumerico: 19.00,
       totalPagar: '\$19.00',
       fase: 2,
     ),
@@ -202,56 +170,146 @@ class _HomeScreenState extends State<HomeScreen> {
     _obtenerDatosDeApi();
   }
 
+  String _nombreCategoria(int? catId) {
+    switch (catId) {
+      case 1:
+        return 'Sedán';
+      case 2:
+        return 'Pick Up';
+      case 3:
+        return 'Carros Medianos';
+      case 4:
+        return 'Carros Grandes';
+      case 5:
+        return 'Microbús';
+      default:
+        return 'Sedán';
+    }
+  }
+
   Future<void> _obtenerDatosDeApi({bool mostrarMensaje = false}) async {
     setState(() => _cargandoApi = true);
-
     try {
-      final uri = Uri.parse('$_apiUrl/vehiculos');
-      final response = await http.get(uri).timeout(const Duration(seconds: 4));
+      final resOrdenes = await http
+          .get(Uri.parse('$_apiUrl/ordenes/'))
+          .timeout(const Duration(seconds: 4));
+      final resVehiculos = await http
+          .get(Uri.parse('$_apiUrl/vehiculos/'))
+          .timeout(const Duration(seconds: 4));
+      final resClientes = await http
+          .get(Uri.parse('$_apiUrl/clientes/'))
+          .timeout(const Duration(seconds: 4));
+      final resPagos = await http
+          .get(Uri.parse('$_apiUrl/finanzas/pagos'))
+          .timeout(const Duration(seconds: 4));
+      final resComisiones = await http
+          .get(Uri.parse('$_apiUrl/finanzas/comisiones'))
+          .timeout(const Duration(seconds: 4));
 
-      if (response.statusCode == 200) {
-        final decoded = jsonDecode(utf8.decode(response.bodyBytes));
-        final List<dynamic> listaJson = decoded is List
-            ? decoded
-            : (decoded['data'] ?? decoded['vehiculos'] ?? []);
+      if (resOrdenes.statusCode == 200 && resVehiculos.statusCode == 200) {
+        final List<dynamic> ordenesJson =
+            jsonDecode(utf8.decode(resOrdenes.bodyBytes));
+        final List<dynamic> vehiculosJson =
+            jsonDecode(utf8.decode(resVehiculos.bodyBytes));
+        final List<dynamic> clientesJson = resClientes.statusCode == 200
+            ? jsonDecode(utf8.decode(resClientes.bodyBytes))
+            : [];
+        final List<dynamic> pagosJson = resPagos.statusCode == 200
+            ? jsonDecode(utf8.decode(resPagos.bodyBytes))
+            : [];
+        final List<dynamic> comisionesJson = resComisiones.statusCode == 200
+            ? jsonDecode(utf8.decode(resComisiones.bodyBytes))
+            : [];
 
-        if (listaJson.isNotEmpty) {
-          setState(() {
-            _vehiculos = List.generate(
-              listaJson.length,
-              (i) => VehiculoPatio.fromJson(
-                Map<String, dynamic>.from(listaJson[i]),
-                i,
-              ),
-            );
-            _conectadoConApi = true;
-          });
-        } else {
-          setState(() => _conectadoConApi = true);
+        final Map<int, Map<String, dynamic>> vehMap = {
+          for (var v in vehiculosJson) (v['id'] as int): Map<String, dynamic>.from(v)
+        };
+        final Map<int, Map<String, dynamic>> cliMap = {
+          for (var c in clientesJson) (c['id'] as int): Map<String, dynamic>.from(c)
+        };
+        final Set<int> ordenesPagadas = {
+          for (var p in pagosJson) (p['orden_id'] as int)
+        };
+
+        double sumaPagos = 0.0;
+        for (var p in pagosJson) {
+          sumaPagos += double.tryParse(p['monto'].toString()) ?? 0.0;
         }
+
+        double sumaComisiones = 0.0;
+        for (var cm in comisionesJson) {
+          sumaComisiones +=
+              double.tryParse(cm['comision_calculada'].toString()) ?? 0.0;
+        }
+
+        final List<VehiculoPatio> listaConstruida = [];
+        for (var o in ordenesJson) {
+          final int oid = o['id'] ?? 1;
+          final int vid = o['vehiculo_id'] ?? 1;
+          final veh = vehMap[vid] ?? {};
+          final cli = cliMap[veh['cliente_id']] ?? {};
+
+          final estadoStr = (o['estado'] ?? 'Pendiente').toString().toLowerCase();
+          int fase = 0;
+          if (estadoStr.contains('proceso')) fase = 1;
+          if (estadoStr.contains('listo') || estadoStr.contains('terminado')) {
+            fase = 2;
+          }
+
+          final double total =
+              double.tryParse((o['total_pagar'] ?? '0').toString()) ?? 0.0;
+          final double montoMostrar = total > 0 ? total : 8.00;
+
+          listaConstruida.add(
+            VehiculoPatio(
+              ordenId: oid,
+              vehiculoId: vid,
+              placa: (veh['placa'] ?? 'SIN-PLACA').toString(),
+              marca: (veh['marca'] ?? 'Vehículo').toString(),
+              modelo: (veh['modelo'] ?? '').toString(),
+              color: (veh['color'] ?? 'N/A').toString(),
+              categoria: _nombreCategoria(veh['categoria_vehiculo_id']),
+              cliente: (cli['nombre_completo'] ?? 'Cliente General').toString(),
+              correoCliente: (cli['correo'] ?? 'Sin correo').toString(),
+              telefonoCliente: (cli['telefono'] ?? '---').toString(),
+              bahia: 'Bahia ${o['bahia_id'] ?? 1}',
+              servicio: 'Orden de Lavado #$oid',
+              montoNumerico: montoMostrar,
+              totalPagar: '\$${montoMostrar.toStringAsFixed(2)}',
+              fase: fase,
+              pagado: ordenesPagadas.contains(oid),
+            ),
+          );
+        }
+
+        setState(() {
+          if (listaConstruida.isNotEmpty) {
+            _vehiculos = listaConstruida;
+          }
+          _totalCobradoHoy = sumaPagos;
+          _totalComisionesOperarios = sumaComisiones;
+          _cantidadLavadosComision = comisionesJson.length;
+          _conectadoConApi = true;
+        });
 
         if (mostrarMensaje && mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
               backgroundColor: Color(0xFF15803D),
-              content: Text('Sincronizado con sprintwash_db vía API'),
+              content: Text('Sincronizado en tiempo real con sprintwash_db'),
               duration: Duration(seconds: 2),
             ),
           );
         }
-      } else {
-        setState(() => _conectadoConApi = false);
       }
     } catch (_) {
       setState(() => _conectadoConApi = false);
       if (mostrarMensaje && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            backgroundColor: Color(0xFFB45309),
-            content: Text(
-              'Mostrando los 3 vehículos de sprintwash_db en modo local',
-            ),
-            duration: Duration(seconds: 2),
+          SnackBar(
+            backgroundColor: const Color(0xFFB45309),
+            content: Text('Sin conexión a $_apiUrl (Modo local activo)'),
+            duration: const Duration(seconds: 2),
           ),
         );
       }
@@ -269,17 +327,14 @@ class _HomeScreenState extends State<HomeScreen> {
 
     try {
       await http
-          .put(
-            Uri.parse('$_apiUrl/ordenes/${v.ordenId}'),
+          .patch(
+            Uri.parse('$_apiUrl/ordenes/${v.ordenId}/estado'),
             headers: {'Content-Type': 'application/json'},
             body: jsonEncode({
-              'id': v.ordenId,
-              'vehiculo_id': v.vehiculoId,
-              'placa': v.placa,
-              'estado': _nombresFase[nuevaFase],
+              'estado': _estadosApi[nuevaFase],
             }),
           )
-          .timeout(const Duration(seconds: 2));
+          .timeout(const Duration(seconds: 8));
     } catch (_) {}
 
     if (!mounted) return;
@@ -291,7 +346,7 @@ class _HomeScreenState extends State<HomeScreen> {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         content: Text(
           v.fase == 2
-              ? '${v.nombreCompletoCarro} (${v.placa}) -> TERMINADO\nNotificación lista para: ${v.correoCliente}'
+              ? '${v.nombreCompletoCarro} (${v.placa}) -> LISTO PARA ENTREGA\nPre-factura enviada a: ${v.correoCliente}'
               : '${v.nombreCompletoCarro} (${v.placa}) -> ${_nombresFase[v.fase].toUpperCase()}',
           style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12.5),
         ),
@@ -300,9 +355,126 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  Future<void> _abrirModalCobro(VehiculoPatio v) async {
+    String metodoSeleccionado = 'Efectivo';
+    bool seleccionoDosOperarios = false;
+
+    await showDialog(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(20),
+              ),
+              title: Text(
+                'Cobrar Orden #${v.ordenId} (${v.placa})',
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Cliente: ${v.cliente}',
+                    style: const TextStyle(fontSize: 13, color: Color(0xFF4B5563)),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'Total a cobrar: ${v.totalPagar}',
+                    style: const TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.w800,
+                      color: kRoyalBlue,
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  DropdownButtonFormField<String>(
+                    value: metodoSeleccionado,
+                    decoration: const InputDecoration(
+                      labelText: 'Método de Pago',
+                      border: OutlineInputBorder(),
+                    ),
+                    items: const [
+                      DropdownMenuItem(value: 'Efectivo', child: Text('Efectivo')),
+                      DropdownMenuItem(value: 'Tarjeta', child: Text('Tarjeta')),
+                      DropdownMenuItem(
+                        value: 'Transferencia',
+                        child: Text('Transferencia / QR'),
+                      ),
+                    ],
+                    onChanged: (val) {
+                      if (val != null) {
+                        setDialogState(() => metodoSeleccionado = val);
+                      }
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text(
+                      'Lavado Simultáneo (2 Operarios)',
+                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                    ),
+                    subtitle: const Text(
+                      'Divide automáticamente la comisión en planilla',
+                      style: TextStyle(fontSize: 11.5),
+                    ),
+                    value: seleccionoDosOperarios,
+                    onChanged: (val) {
+                      setDialogState(() => seleccionoDosOperarios = val);
+                    },
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Cancelar'),
+                ),
+                ElevatedButton(
+                  onPressed: () async {
+                    try {
+                      await http.post(
+                        Uri.parse('$_apiUrl/finanzas/pagos'),
+                        headers: {'Content-Type': 'application/json'},
+                        body: jsonEncode({
+                          'orden_id': v.ordenId,
+                          'cajero_id': 2,
+                          'metodo_pago': metodoSeleccionado,
+                          'monto': v.montoNumerico,
+                        }),
+                      );
+                      await http.post(
+                        Uri.parse('$_apiUrl/finanzas/asignar-operarios'),
+                        headers: {'Content-Type': 'application/json'},
+                        body: jsonEncode({
+                          'orden_id': v.ordenId,
+                          'operarios_ids': seleccionoDosOperarios ? [3, 4] : [3],
+                          'comision_extra_manual': 0.0,
+                        }),
+                      );
+                    } catch (_) {}
+                    if (context.mounted) Navigator.pop(context);
+                    await _obtenerDatosDeApi(mostrarMensaje: true);
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF16A34A),
+                    foregroundColor: Colors.white,
+                  ),
+                  child: const Text('Confirmar Cobro'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
   void _configurarUrlApi() {
     final urlCtrl = TextEditingController(text: _apiUrl);
-
     showDialog(
       context: context,
       builder: (context) {
@@ -316,14 +488,14 @@ class _HomeScreenState extends State<HomeScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               const Text(
-                'Dirección IP del servidor FastAPI conectado a sprintwash_db:',
+                'Dirección IP o VPS del servidor FastAPI (puerto 8000):',
                 style: TextStyle(fontSize: 13, color: Color(0xFF4B5563)),
               ),
               const SizedBox(height: 12),
               TextField(
                 controller: urlCtrl,
                 decoration: const InputDecoration(
-                  hintText: 'http://192.168.1.15:8000',
+                  hintText: 'http://127.0.0.1:8000',
                   border: OutlineInputBorder(),
                   prefixIcon: Icon(Icons.link_rounded),
                 ),
@@ -337,7 +509,8 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             ElevatedButton(
               onPressed: () {
-                final limpio = urlCtrl.text.trim().replaceAll(RegExp(r'/$'), '');
+                final limpio =
+                    urlCtrl.text.trim().replaceAll(RegExp(r'/$'), '');
                 if (limpio.isNotEmpty) {
                   setState(() => _apiUrl = limpio);
                 }
@@ -362,7 +535,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final modeloCtrl = TextEditingController();
     final colorCtrl = TextEditingController();
     final clienteCtrl = TextEditingController();
-    String categoriaSeleccionada = 'Sedan';
+    int categoriaIdSeleccionada = 1;
 
     showModalBottomSheet(
       context: context,
@@ -385,7 +558,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   const Text(
-                    'Recepción de Vehiculo (sprintwash_db)',
+                    'Recepción de Vehículo en Patio',
                     style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
                   ),
                   const SizedBox(height: 12),
@@ -437,37 +610,22 @@ class _HomeScreenState extends State<HomeScreen> {
                     ],
                   ),
                   const SizedBox(height: 10),
-                  DropdownButtonFormField<String>(
-                    value: categoriaSeleccionada,
+                  DropdownButtonFormField<int>(
+                    value: categoriaIdSeleccionada,
                     decoration: const InputDecoration(
-                      labelText: 'Categoria (tabla categoria_vehiculos)',
+                      labelText: 'Categoría de Vehículo',
                       border: OutlineInputBorder(),
                     ),
                     items: const [
-                      DropdownMenuItem(
-                        value: 'Sedan',
-                        child: Text('Sedan (\$4.00 Base)'),
-                      ),
-                      DropdownMenuItem(
-                        value: 'Pick Up',
-                        child: Text('Pick Up (\$8.00 Base)'),
-                      ),
-                      DropdownMenuItem(
-                        value: 'Carros Medianos',
-                        child: Text('Carros Medianos'),
-                      ),
-                      DropdownMenuItem(
-                        value: 'Carros Grandes',
-                        child: Text('Carros Grandes'),
-                      ),
-                      DropdownMenuItem(
-                        value: 'Microbus',
-                        child: Text('Microbus'),
-                      ),
+                      DropdownMenuItem(value: 1, child: Text('Sedán (\$4.00 Base)')),
+                      DropdownMenuItem(value: 2, child: Text('Pick Up (\$8.00 Base)')),
+                      DropdownMenuItem(value: 3, child: Text('Carros Medianos (\$6.00)')),
+                      DropdownMenuItem(value: 4, child: Text('Carros Grandes (\$8.00)')),
+                      DropdownMenuItem(value: 5, child: Text('Microbús (\$10.00)')),
                     ],
                     onChanged: (val) {
                       if (val != null) {
-                        setModalState(() => categoriaSeleccionada = val);
+                        setModalState(() => categoriaIdSeleccionada = val);
                       }
                     },
                   ),
@@ -475,59 +633,85 @@ class _HomeScreenState extends State<HomeScreen> {
                   TextField(
                     controller: clienteCtrl,
                     decoration: const InputDecoration(
-                      labelText: 'Cliente (tabla clientes)',
+                      labelText: 'Nombre del Cliente',
                       border: OutlineInputBorder(),
                     ),
                   ),
                   const SizedBox(height: 14),
                   ElevatedButton.icon(
-                    onPressed: () {
-                      if (marcaCtrl.text.trim().isEmpty &&
-                          modeloCtrl.text.trim().isEmpty) {
-                        return;
-                      }
-                      final bahiaLibre = _primeraBahiaLibre();
-                      if (bahiaLibre == null) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text('No hay bahías libres'),
-                          ),
+                    onPressed: () async {
+                      final placa = placaCtrl.text.trim().isEmpty
+                          ? 'P-${DateTime.now().millisecondsSinceEpoch % 100000}'
+                          : placaCtrl.text.trim().toUpperCase();
+                      final marca = marcaCtrl.text.trim().isEmpty
+                          ? 'Toyota'
+                          : marcaCtrl.text.trim();
+                      final modelo = modeloCtrl.text.trim().isEmpty
+                          ? 'Corolla'
+                          : modeloCtrl.text.trim();
+                      final color = colorCtrl.text.trim().isEmpty
+                          ? 'Gris'
+                          : colorCtrl.text.trim();
+                      final nombreCli = clienteCtrl.text.trim().isEmpty
+                          ? 'Cliente Patio'
+                          : clienteCtrl.text.trim();
+                      final precioBase = categoriaIdSeleccionada == 2 ? 8.00 : 4.00;
+                      final totalConIva =
+                          double.parse((precioBase * 1.13).toStringAsFixed(2));
+
+                      try {
+                        int clienteId = 1;
+                        final resCli = await http.post(
+                          Uri.parse('$_apiUrl/clientes/'),
+                          headers: {'Content-Type': 'application/json'},
+                          body: jsonEncode({'nombre_completo': nombreCli}),
                         );
-                        return;
-                      }
-                      final esPickUp = categoriaSeleccionada == 'Pick Up';
-                      setState(() {
-                        _vehiculos.insert(
-                          0,
-                          VehiculoPatio(
-                            ordenId: _vehiculos.length + 1,
-                            vehiculoId: _vehiculos.length + 1,
-                            placa: placaCtrl.text.trim().isEmpty
-                                ? 'P999000'
-                                : placaCtrl.text.trim().toUpperCase(),
-                            marca: marcaCtrl.text.trim().isEmpty
-                                ? 'Toyota'
-                                : marcaCtrl.text.trim(),
-                            modelo: modeloCtrl.text.trim().isEmpty
-                                ? 'Corolla'
-                                : modeloCtrl.text.trim(),
-                            color: colorCtrl.text.trim().isEmpty
-                                ? 'Gris'
-                                : colorCtrl.text.trim(),
-                            categoria: categoriaSeleccionada,
-                            cliente: clienteCtrl.text.trim().isEmpty
-                                ? 'Cliente Nuevo'
-                                : clienteCtrl.text.trim(),
-                            correoCliente: 'bescamillarios12@gmail.com',
-                            telefonoCliente: '7857-4566',
-                            bahia: 'Bahia $bahiaLibre',
-                            servicio: 'Lavado Básico',
-                            totalPagar: esPickUp ? '\$8.00' : '\$4.00',
-                            fase: 0,
-                          ),
+                        if (resCli.statusCode == 200) {
+                          clienteId = jsonDecode(resCli.body)['id'] ?? 1;
+                        }
+
+                        final resVeh = await http.post(
+                          Uri.parse('$_apiUrl/vehiculos/'),
+                          headers: {'Content-Type': 'application/json'},
+                          body: jsonEncode({
+                            'cliente_id': clienteId,
+                            'categoria_vehiculo_id': categoriaIdSeleccionada,
+                            'placa': placa,
+                            'marca': marca,
+                            'modelo': modelo,
+                            'color': color,
+                          }),
                         );
-                      });
-                      Navigator.pop(context);
+
+                        if (resVeh.statusCode == 200) {
+                          final int vehId = jsonDecode(resVeh.body)['id'];
+                          final resOrd = await http.post(
+                            Uri.parse('$_apiUrl/ordenes/'),
+                            headers: {'Content-Type': 'application/json'},
+                            body: jsonEncode({
+                              'vehiculo_id': vehId,
+                              'bahia_id': 1,
+                              'estado': 'Pendiente',
+                            }),
+                          );
+                          if (resOrd.statusCode == 200) {
+                            final int ordId = jsonDecode(resOrd.body)['id'];
+                            await http.patch(
+                              Uri.parse('$_apiUrl/ordenes/$ordId'),
+                              headers: {'Content-Type': 'application/json'},
+                              body: jsonEncode({
+                                'subtotal': precioBase,
+                                'impuestos':
+                                    double.parse((precioBase * 0.13).toStringAsFixed(2)),
+                                'total_pagar': totalConIva,
+                              }),
+                            );
+                          }
+                        }
+                      } catch (_) {}
+
+                      if (context.mounted) Navigator.pop(context);
+                      await _obtenerDatosDeApi(mostrarMensaje: true);
                     },
                     style: ElevatedButton.styleFrom(
                       backgroundColor: kRoyalBlue,
@@ -595,14 +779,14 @@ class _HomeScreenState extends State<HomeScreen> {
                 icono: Icons.home_outlined,
                 activo: _selectedIndex == 0,
               ),
-              label: 'Inicio',
+              label: 'Patio',
             ),
             BottomNavigationBarItem(
               icon: _IconoBarraInferior(
-                icono: Icons.bar_chart_rounded,
+                icono: Icons.payments_outlined,
                 activo: _selectedIndex == 1,
               ),
-              label: 'Actividad',
+              label: 'Cobros e Historial',
             ),
             BottomNavigationBarItem(
               icon: _IconoBarraInferior(
@@ -640,19 +824,40 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
-              'Buenos días,',
-              style: TextStyle(
-                fontSize: 16,
-                color: Color(0xFF6B7280),
-                fontWeight: FontWeight.w500,
-              ),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text(
+                  'Operaciones de Patio',
+                  style: TextStyle(
+                    fontSize: 18,
+                    color: Color(0xFF111827),
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                IconButton(
+                  onPressed: () => _obtenerDatosDeApi(mostrarMensaje: true),
+                  icon: _cargandoApi
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : Icon(
+                          Icons.sync_rounded,
+                          color: _conectadoConApi
+                              ? const Color(0xFF16A34A)
+                              : const Color(0xFF6B7280),
+                        ),
+                  tooltip: 'Sincronizar con API',
+                ),
+              ],
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 8),
             TextField(
               onChanged: (valor) => setState(() => _busqueda = valor),
               decoration: InputDecoration(
-                hintText: 'Buscar vehiculo por placa (ej. P765765)...',
+                hintText: 'Buscar vehículo por placa o cliente...',
                 hintStyle: const TextStyle(
                   color: Color(0xFF9CA3AF),
                   fontSize: 14,
@@ -769,7 +974,7 @@ class _HomeScreenState extends State<HomeScreen> {
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 const Text(
-                  'Vehiculos en Patio',
+                  'Vehículos en Patio',
                   style: TextStyle(
                     fontSize: 18,
                     fontWeight: FontWeight.w700,
@@ -779,7 +984,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 GestureDetector(
                   onTap: () => setState(() => _selectedIndex = 1),
                   child: const Text(
-                    'Ver todo',
+                    'Ver Cobros e Historial',
                     style: TextStyle(
                       fontSize: 13.5,
                       fontWeight: FontWeight.w700,
@@ -838,7 +1043,7 @@ class _HomeScreenState extends State<HomeScreen> {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
-                                '${v.nombreCompletoCarro} ·${v.categoria}',
+                                '${v.nombreCompletoCarro} • ${v.categoria}',
                                 style: const TextStyle(
                                   fontSize: 15,
                                   fontWeight: FontWeight.w700,
@@ -847,10 +1052,15 @@ class _HomeScreenState extends State<HomeScreen> {
                               ),
                               const SizedBox(height: 2),
                               Text(
-                                'Color: ${v.color} • ${v.bahia} •${v.totalPagar}',
-                                style: const TextStyle(
+                                '${v.bahia} • ${v.totalPagar} ${v.pagado ? "(PAGADO)" : ""}',
+                                style: TextStyle(
                                   fontSize: 12,
-                                  color: Color(0xFF6B7280),
+                                  fontWeight: v.pagado
+                                      ? FontWeight.bold
+                                      : FontWeight.normal,
+                                  color: v.pagado
+                                      ? const Color(0xFF16A34A)
+                                      : const Color(0xFF6B7280),
                                 ),
                               ),
                             ],
@@ -883,13 +1093,6 @@ class _HomeScreenState extends State<HomeScreen> {
                         fontSize: 12,
                         color: Color(0xFF4B5563),
                         fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                    Text(
-                      'Servicio: ${v.servicio}',
-                      style: const TextStyle(
-                        fontSize: 12,
-                        color: Color(0xFF6B7280),
                       ),
                     ),
                     const SizedBox(height: 12),
@@ -955,7 +1158,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 onTap: () => setState(() => _selectedIndex = 0),
               ),
               const Text(
-                'Control de Patio',
+                'Cobros e Historial',
                 style: TextStyle(
                   fontSize: 20,
                   fontWeight: FontWeight.w700,
@@ -969,6 +1172,89 @@ class _HomeScreenState extends State<HomeScreen> {
             ],
           ),
           const SizedBox(height: 18),
+          // Tarjetas de Resumen Financiero y Comisiones del Operario (Sprint 3)
+          Row(
+            children: [
+              Expanded(
+                child: Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFDCFCE7),
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'MI COMISIÓN (PLANILLA)',
+                        style: TextStyle(
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.w800,
+                          color: Color(0xFF15803D),
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        '\$${_totalComisionesOperarios.toStringAsFixed(2)}',
+                        style: const TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.w900,
+                          color: Color(0xFF15803D),
+                        ),
+                      ),
+                      Text(
+                        '$_cantidadLavadosComision servicios asignados',
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: Color(0xFF166534),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFDBEAFE),
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'CAJA DIARIA COBRADA',
+                        style: TextStyle(
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.w800,
+                          color: kRoyalBlue,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        '\$${_totalCobradoHoy.toStringAsFixed(2)}',
+                        style: const TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.w900,
+                          color: kRoyalBlue,
+                        ),
+                      ),
+                      Text(
+                        '${_vehiculos.length} órdenes registradas',
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: Color(0xFF1E40AF),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
           Container(
             padding: const EdgeInsets.all(4),
             decoration: BoxDecoration(
@@ -1003,77 +1289,20 @@ class _HomeScreenState extends State<HomeScreen> {
               }).toList(),
             ),
           ),
-          const SizedBox(height: 18),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 18),
-            decoration: BoxDecoration(
-              color: const Color(0xFFF3F4F6),
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: Column(
-              children: [
-                const Text(
-                  'Flujo diario de vehículos (sprintwash_db)',
-                  style: TextStyle(
-                    fontSize: 13.5,
-                    color: Color(0xFF4B5563),
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-                const SizedBox(height: 10),
-                Text(
-                  '${_vehiculos.length} órdenes hoy',
-                  style: const TextStyle(
-                    fontSize: 22,
-                    fontWeight: FontWeight.w800,
-                    color: kRoyalBlue,
-                  ),
-                ),
-                const SizedBox(height: 10),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: List.generate(3, (i) {
-                    final cantidad =
-                        _vehiculos.where((v) => v.fase == i).length;
-                    return Container(
-                      margin: EdgeInsets.only(right: i < 2 ? 6 : 0),
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 10,
-                        vertical: 4,
-                      ),
-                      decoration: BoxDecoration(
-                        color: _fondosFase[i],
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                      child: Text(
-                        '$cantidad ${_nombresFase[i]}',
-                        style: TextStyle(
-                          fontSize: 11.5,
-                          fontWeight: FontWeight.w700,
-                          color: _coloresFase[i],
-                        ),
-                      ),
-                    );
-                  }),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 22),
+          const SizedBox(height: 20),
           const Text(
-            'Listado de Ordenes',
+            'Historial de Servicios y Registro de Cobro',
             style: TextStyle(
-              fontSize: 17,
+              fontSize: 16,
               fontWeight: FontWeight.w700,
               color: Color(0xFF111827),
             ),
           ),
           const Text(
-            'Actualizado en tiempo real',
+            'Toca "Cobrar" para registrar el pago y calcular comisión en planilla',
             style: TextStyle(fontSize: 12, color: Color(0xFF9CA3AF)),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 12),
           ...filtrados.map((v) => _buildFilaOrden(v)),
         ],
       ),
@@ -1109,7 +1338,7 @@ class _HomeScreenState extends State<HomeScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  '${v.placa} · ${v.nombreCompletoCarro} (${v.color})',
+                  '${v.placa} • ${v.nombreCompletoCarro} (${v.categoria})',
                   style: const TextStyle(
                     fontSize: 14,
                     fontWeight: FontWeight.w700,
@@ -1118,10 +1347,10 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  '${_nombresFase[v.fase]} · ${v.bahia} · ${v.servicio}',
+                  '${_nombresFase[v.fase]} • ${v.cliente}',
                   style: const TextStyle(
                     fontSize: 12,
-                    color: Color(0xFF9CA3AF),
+                    color: Color(0xFF6B7280),
                   ),
                 ),
               ],
@@ -1133,24 +1362,24 @@ class _HomeScreenState extends State<HomeScreen> {
               Text(
                 v.totalPagar,
                 style: const TextStyle(
-                  fontSize: 13,
+                  fontSize: 13.5,
                   fontWeight: FontWeight.w800,
                 ),
               ),
               const SizedBox(height: 4),
               InkWell(
-                onTap: () => _cambiarEstado(v, (v.fase + 1) % 3),
+                onTap: () => _abrirModalCobro(v),
                 child: Container(
                   padding: const EdgeInsets.symmetric(
                     horizontal: 10,
                     vertical: 5,
                   ),
                   decoration: BoxDecoration(
-                    color: color,
+                    color: v.pagado ? const Color(0xFF16A34A) : kRoyalBlue,
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child: Text(
-                    _nombresFase[v.fase],
+                    v.pagado ? 'PAGADO' : 'Cobrar',
                     style: const TextStyle(
                       color: Colors.white,
                       fontSize: 11,
@@ -1207,7 +1436,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                   alignment: Alignment.center,
                   child: const Text(
-                    'SU',
+                    'OP',
                     style: TextStyle(
                       color: Colors.white,
                       fontSize: 22,
@@ -1221,7 +1450,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        'Supervisor',
+                        'Operario / Supervisor',
                         style: TextStyle(
                           fontSize: 18,
                           fontWeight: FontWeight.w700,
@@ -1235,15 +1464,6 @@ class _HomeScreenState extends State<HomeScreen> {
                           color: Color(0xFF6B7280),
                         ),
                       ),
-                      SizedBox(height: 6),
-                      Text(
-                        'Editar perfil',
-                        style: TextStyle(
-                          fontSize: 12.5,
-                          fontWeight: FontWeight.w700,
-                          color: kRoyalBlue,
-                        ),
-                      ),
                     ],
                   ),
                 ),
@@ -1252,7 +1472,7 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
           const SizedBox(height: 24),
           const Text(
-            'SISTEMA (sprintwash_db)',
+            'CONEXIÓN A SERVIDOR / VPS (sprintwash_db)',
             style: TextStyle(
               fontSize: 11.5,
               fontWeight: FontWeight.w700,
@@ -1279,20 +1499,6 @@ class _HomeScreenState extends State<HomeScreen> {
                     style: const TextStyle(fontSize: 12),
                   ),
                   trailing: const Icon(Icons.chevron_right_rounded),
-                ),
-                const Divider(height: 1),
-                const ListTile(
-                  leading:
-                      Icon(Icons.verified_user_outlined, color: kRoyalBlue),
-                  title: Text(
-                    'Seguridad',
-                    style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
-                  ),
-                  subtitle: Text(
-                    'Contraseña y acceso',
-                    style: TextStyle(fontSize: 12),
-                  ),
-                  trailing: Icon(Icons.chevron_right_rounded),
                 ),
               ],
             ),
