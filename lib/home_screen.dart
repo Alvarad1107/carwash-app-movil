@@ -53,7 +53,6 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   static const Color kRoyalBlue = Color(0xFF1422B8);
 
-  // Se puede cambiar desde el ícono de engranaje en la pestaña "Perfil" por la IP de tu PC o VPS
   String _apiUrl = 'http://68.211.73.10:8000';  
   bool _cargandoApi = false;
   bool _conectadoConApi = false;
