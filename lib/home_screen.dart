@@ -355,6 +355,20 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _abrirModalCobro(VehiculoPatio v) async {
+    // 1. Candado lógico de negocio: Bloquear si no está terminado
+    if (v.fase != 2) {
+      ScaffoldMessenger.of(context).clearSnackBars();
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('⚠️ No se permite cobrar: El vehículo aún no está finalizado su lavado.'),
+          backgroundColor: Colors.redAccent,
+          behavior: SnackBarBehavior.floating,
+          duration: Duration(seconds: 3),
+        ),
+      );
+      return; // Aborta la función y evita que se abra el modal
+    }
+
     String metodoSeleccionado = 'Efectivo';
     bool seleccionoDosOperarios = false;
 
@@ -1284,7 +1298,9 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                     ),
                   ),
+
                 );
+
               }).toList(),
             ),
           ),
