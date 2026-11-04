@@ -2,6 +2,8 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'home_screen.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'registro_screen.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -21,33 +23,36 @@ class _LoginScreenState extends State<LoginScreen> {
   bool _ocultarPassword = true;
   bool _isLoading = false; // Controla el estado de carga del botón
 
-  Future<void> _iniciarSesion() async {
-    setState(() {
-      _isLoading = true;
-    });
+// ...
 
+Future<void> _iniciarSesion() async {
+    setState(() => _isLoading = true);
     final String email = _emailCtrl.text.trim();
     final String password = _passCtrl.text.trim();
-
-    // Ruta hacia tu VPS en Azure (Ajusta '/login' si Erick usó '/token')
-    final url = Uri.parse('http://68.211.73.10:8000/login'); 
+    
+    // Ruta apuntando a tu servidor local
+    final url = Uri.parse('http://10.0.2.2:8000/auth/login'); 
 
     try {
       final response = await http.post(
         url,
-        // FastAPI usa form-urlencoded para el login estándar de OAuth2
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        body: {
-          'username': email, // FastAPI recibe el correo en el campo 'username'
+        headers: {'Content-Type': 'application/json'}, // Formato corregido
+        body: jsonEncode({
+          'correo': email, // Llave corregida
           'password': password,
-        },
+        }),
       );
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
-        print('Token recibido: ${data["access_token"]}');
         
-        // Si el widget sigue montado, navegamos a la pantalla principal
+        // Guardamos el token y la información del usuario devuelta por FastAPI
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('jwt_token', data["access_token"]);
+        await prefs.setString('user_nombre', data["nombre"] ?? 'Usuario');
+        await prefs.setString('user_rol', data["rol"] ?? 'Sin rol');
+        await prefs.setString('user_correo', email); // Usamos el email que digitó
+
         if (mounted) {
           Navigator.pushReplacement(
             context,
@@ -55,43 +60,39 @@ class _LoginScreenState extends State<LoginScreen> {
           );
         }
       } else {
-        // Credenciales incorrectas o error en el servidor
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Correo o contraseña incorrectos'),
-              backgroundColor: Colors.redAccent,
-              behavior: SnackBarBehavior.floating,
-            ),
+            const SnackBar(content: Text('Credenciales incorrectas o usuario inactivo')),
           );
         }
       }
     } catch (e) {
-      // Error de red (VPS caída o falta de internet)
+      // Manejo de errores de red
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Error al conectar con el servidor: $e'),
-            backgroundColor: Colors.redAccent,
-            behavior: SnackBarBehavior.floating,
-          ),
+          SnackBar(content: Text('Error de conexión: $e')),
         );
       }
     } finally {
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-        });
-      }
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
-  void _irAlPatio() {
-    Navigator.pushReplacement(
-      context,
-      MaterialPageRoute(builder: (context) => const HomeScreen()),
-    );
+  Future<void> _abrirPantallaRegistro() async {
+  // Esperamos a que la pantalla de registro se cierre y nos devuelva datos   si fue exitoso
+  final credenciales = await Navigator.push(
+    context,
+    MaterialPageRoute(builder: (context) => const RegistroScreen()),
+  );
+
+  // Si nos devolvió un correo y contraseña, los escribimos automáticamente
+  if (credenciales != null && credenciales is Map) {
+    setState(() {
+      _emailCtrl.text = credenciales['correo'];
+      _passCtrl.text = credenciales['password'];
+    });
   }
+}
 
   @override
   Widget build(BuildContext context) {
@@ -280,15 +281,10 @@ class _LoginScreenState extends State<LoginScreen> {
                     style: TextStyle(color: Color(0xFF9CA3AF), fontSize: 13),
                   ),
                   GestureDetector(
-                    onTap: _irAlPatio,
-                    child: const Text(
-                      'Crear cuenta',
-                      style: TextStyle(
-                        color: kRoyalBlue,
-                        fontWeight: FontWeight.w700,
-                        fontSize: 13,
-                      ),
-                    ),
+                  onTap: _abrirPantallaRegistro,
+                      child: const Text('Crear cuenta', 
+                      style: TextStyle(color: kRoyalBlue, 
+                      fontWeight: FontWeight.w700, fontSize: 13)),
                   ),
                 ],
               ),
