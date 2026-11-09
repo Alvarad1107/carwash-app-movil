@@ -1,24 +1,23 @@
 import 'package:flutter/material.dart';
-import 'login_screen.dart';
+import 'core/app_theme.dart';
+import 'core/app_routes.dart';
 
 void main() {
-  runApp(const MyApp());
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(const SprintWashApp());
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class SprintWashApp extends StatelessWidget {
+  const SprintWashApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      debugShowCheckedModeBanner: false,
       title: 'Sprint Wash',
-      theme: ThemeData(
-        useMaterial3: true,
-        scaffoldBackgroundColor: Colors.white,
-        colorSchemeSeed: const Color(0xFF1422B8),
-      ),
-      home: const LoginScreen(),
+      debugShowCheckedModeBanner: false,
+      theme: AppTheme.lightTheme,
+      initialRoute: AppRoutes.login,
+      onGenerateRoute: AppRoutes.generateRoute,
     );
   }
 }

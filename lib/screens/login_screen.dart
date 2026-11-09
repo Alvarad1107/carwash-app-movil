@@ -1,9 +1,7 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
+import '../core/app_colors.dart';
+import '../services/api_service.dart';
 import 'home_screen.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-import 'registro_screen.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -13,46 +11,25 @@ class LoginScreen extends StatefulWidget {
 }
 
 class _LoginScreenState extends State<LoginScreen> {
-  static const Color kRoyalBlue = Color(0xFF1422B8);
+  final _apiService = ApiService();
 
   final TextEditingController _emailCtrl =
       TextEditingController(text: 'supervisor@sprintwash.com');
   final TextEditingController _passCtrl =
       TextEditingController(text: '12345678');
-  
+
   bool _ocultarPassword = true;
-  bool _isLoading = false; // Controla el estado de carga del botón
+  bool _isLoading = false;
 
-// ...
-
-Future<void> _iniciarSesion() async {
+  Future<void> _iniciarSesion() async {
     setState(() => _isLoading = true);
     final String email = _emailCtrl.text.trim();
     final String password = _passCtrl.text.trim();
-    
-    // Ruta apuntando a tu servidor local
-    final url = Uri.parse('http://10.0.2.2:8000/auth/login'); 
 
     try {
-      final response = await http.post(
-        url,
-        headers: {'Content-Type': 'application/json'}, // Formato corregido
-        body: jsonEncode({
-          'correo': email, // Llave corregida
-          'password': password,
-        }),
-      );
+      final success = await _apiService.login(email, password);
 
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        
-        // Guardamos el token y la información del usuario devuelta por FastAPI
-        final prefs = await SharedPreferences.getInstance();
-        await prefs.setString('jwt_token', data["access_token"]);
-        await prefs.setString('user_nombre', data["nombre"] ?? 'Usuario');
-        await prefs.setString('user_rol', data["rol"] ?? 'Sin rol');
-        await prefs.setString('user_correo', email); // Usamos el email que digitó
-
+      if (success) {
         if (mounted) {
           Navigator.pushReplacement(
             context,
@@ -67,7 +44,6 @@ Future<void> _iniciarSesion() async {
         }
       }
     } catch (e) {
-      // Manejo de errores de red
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Error de conexión: $e')),
@@ -77,22 +53,6 @@ Future<void> _iniciarSesion() async {
       if (mounted) setState(() => _isLoading = false);
     }
   }
-
-  Future<void> _abrirPantallaRegistro() async {
-  // Esperamos a que la pantalla de registro se cierre y nos devuelva datos   si fue exitoso
-  final credenciales = await Navigator.push(
-    context,
-    MaterialPageRoute(builder: (context) => const RegistroScreen()),
-  );
-
-  // Si nos devolvió un correo y contraseña, los escribimos automáticamente
-  if (credenciales != null && credenciales is Map) {
-    setState(() {
-      _emailCtrl.text = credenciales['correo'];
-      _passCtrl.text = credenciales['password'];
-    });
-  }
-}
 
   @override
   Widget build(BuildContext context) {
@@ -106,7 +66,7 @@ Future<void> _iniciarSesion() async {
             children: [
               const SizedBox(height: 16),
 
-              // LOGO OFICIAL DE SPRINT WASH
+              // Logo
               Center(
                 child: Image.asset(
                   'assets/logo.png',
@@ -120,7 +80,7 @@ Future<void> _iniciarSesion() async {
                 'BIENVENIDO DE NUEVO',
                 textAlign: TextAlign.center,
                 style: TextStyle(
-                  color: kRoyalBlue,
+                  color: AppColors.kRoyalBlue,
                   fontSize: 13,
                   fontWeight: FontWeight.w700,
                   letterSpacing: 1.1,
@@ -134,7 +94,7 @@ Future<void> _iniciarSesion() async {
                 style: TextStyle(
                   fontSize: 13,
                   fontWeight: FontWeight.w600,
-                  color: Color(0xFF4B5563),
+                  color: AppColors.textSecondary,
                 ),
               ),
               const SizedBox(height: 8),
@@ -143,19 +103,19 @@ Future<void> _iniciarSesion() async {
                 decoration: InputDecoration(
                   prefixIcon: const Icon(
                     Icons.mail_outline_rounded,
-                    color: Color(0xFF6B7280),
+                    color: AppColors.textMuted,
                     size: 20,
                   ),
                   filled: true,
-                  fillColor: const Color(0xFFF9FAFB),
+                  fillColor: AppColors.surfaceLight,
                   contentPadding: const EdgeInsets.symmetric(vertical: 18),
                   enabledBorder: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(14),
-                    borderSide: const BorderSide(color: Color(0xFFE5E7EB)),
+                    borderSide: const BorderSide(color: AppColors.border),
                   ),
                   focusedBorder: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(14),
-                    borderSide: const BorderSide(color: kRoyalBlue, width: 1.5),
+                    borderSide: const BorderSide(color: AppColors.kRoyalBlue, width: 1.5),
                   ),
                 ),
               ),
@@ -167,7 +127,7 @@ Future<void> _iniciarSesion() async {
                 style: TextStyle(
                   fontSize: 13,
                   fontWeight: FontWeight.w600,
-                  color: Color(0xFF4B5563),
+                  color: AppColors.textSecondary,
                 ),
               ),
               const SizedBox(height: 8),
@@ -177,7 +137,7 @@ Future<void> _iniciarSesion() async {
                 decoration: InputDecoration(
                   prefixIcon: const Icon(
                     Icons.lock_outline_rounded,
-                    color: Color(0xFF6B7280),
+                    color: AppColors.textMuted,
                     size: 20,
                   ),
                   suffixIcon: IconButton(
@@ -188,20 +148,20 @@ Future<void> _iniciarSesion() async {
                       _ocultarPassword
                           ? Icons.visibility_outlined
                           : Icons.visibility_off_outlined,
-                      color: const Color(0xFF6B7280),
+                      color: AppColors.textMuted,
                       size: 20,
                     ),
                   ),
                   filled: true,
-                  fillColor: const Color(0xFFF9FAFB),
+                  fillColor: AppColors.surfaceLight,
                   contentPadding: const EdgeInsets.symmetric(vertical: 18),
                   enabledBorder: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(14),
-                    borderSide: const BorderSide(color: Color(0xFFE5E7EB)),
+                    borderSide: const BorderSide(color: AppColors.border),
                   ),
                   focusedBorder: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(14),
-                    borderSide: const BorderSide(color: kRoyalBlue, width: 1.5),
+                    borderSide: const BorderSide(color: AppColors.kRoyalBlue, width: 1.5),
                   ),
                 ),
               ),
@@ -213,7 +173,7 @@ Future<void> _iniciarSesion() async {
                   child: const Text(
                     '¿Olvidaste tu contraseña?',
                     style: TextStyle(
-                      color: kRoyalBlue,
+                      color: AppColors.kRoyalBlue,
                       fontWeight: FontWeight.w700,
                       fontSize: 12.5,
                     ),
@@ -222,14 +182,14 @@ Future<void> _iniciarSesion() async {
               ),
               const SizedBox(height: 20),
 
-              // Botón Iniciar sesión con indicador de carga
+              // Botón Iniciar sesión
               Container(
-                height: 56, // Altura fija para evitar saltos al cargar
+                height: 56,
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(16),
                   boxShadow: [
                     BoxShadow(
-                      color: kRoyalBlue.withAlpha(75),
+                      color: AppColors.kRoyalBlue.withAlpha(75),
                       blurRadius: 20,
                       offset: const Offset(0, 10),
                     ),
@@ -238,8 +198,8 @@ Future<void> _iniciarSesion() async {
                 child: ElevatedButton(
                   onPressed: _isLoading ? null : _iniciarSesion,
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: kRoyalBlue,
-                    disabledBackgroundColor: kRoyalBlue.withOpacity(0.7),
+                    backgroundColor: AppColors.kRoyalBlue,
+                    disabledBackgroundColor: AppColors.kRoyalBlue.withAlpha(178),
                     foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(vertical: 16),
                     shape: RoundedRectangleBorder(
@@ -271,22 +231,6 @@ Future<void> _iniciarSesion() async {
                           ],
                         ),
                 ),
-              ),
-              const SizedBox(height: 70),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const Text(
-                    '¿Aún no tienes cuenta? ',
-                    style: TextStyle(color: Color(0xFF9CA3AF), fontSize: 13),
-                  ),
-                  GestureDetector(
-                  onTap: _abrirPantallaRegistro,
-                      child: const Text('Crear cuenta', 
-                      style: TextStyle(color: kRoyalBlue, 
-                      fontWeight: FontWeight.w700, fontSize: 13)),
-                  ),
-                ],
               ),
             ],
           ),
