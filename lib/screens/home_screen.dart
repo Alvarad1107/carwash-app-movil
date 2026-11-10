@@ -766,6 +766,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
 
     int? vehiculoIdExistente;
+    int? vehiculoClienteIdExistente;
     int? clienteIdExistente;
 
     String prefijoSeleccionado = 'P';
@@ -856,27 +857,27 @@ class _HomeScreenState extends State<HomeScreen> {
                 }
 
                 final clienteId = encontrado['cliente_id'];
+                vehiculoClienteIdExistente =
+                    int.tryParse(clienteId?.toString() ?? '');
                 if (clienteId != null) {
                   final cliente = _listaClientesLocal.firstWhere(
                     (c) => c['id'] == clienteId,
                     orElse: () => null,
                   );
                   if (cliente != null) {
-                    // Sugerir el último cliente que trajo esa placa si el operario no ha elegido otro cliente
-                    if (clienteIdExistente == null ||
-                        (clienteInputCtrl?.text.trim().isEmpty ?? true)) {
-                      clienteIdExistente = cliente['id'];
-                      clienteInputCtrl?.text =
-                          (cliente['nombre_completo'] ?? '').toString();
-                      telefonoCtrl.text = _formatearTelefonoSV(
-                        (cliente['telefono'] ?? '').toString(),
-                      );
-                      correoCtrl.text = (cliente['correo'] ?? '').toString();
-                    }
+                    // Al elegir una placa, cargar siempre su cliente dueño con teléfono y correo
+                    clienteIdExistente = cliente['id'];
+                    clienteInputCtrl?.text =
+                        (cliente['nombre_completo'] ?? '').toString();
+                    telefonoCtrl.text = _formatearTelefonoSV(
+                      (cliente['telefono'] ?? '').toString(),
+                    );
+                    correoCtrl.text = (cliente['correo'] ?? '').toString();
                   }
                 }
               } else {
                 vehiculoIdExistente = null;
+                vehiculoClienteIdExistente = null;
               }
             }
 
@@ -1017,7 +1018,7 @@ class _HomeScreenState extends State<HomeScreen> {
                             const SizedBox(width: 6),
                             Expanded(
                               child: Text(
-                                'Vehículo registrado (#$vehiculoIdExistente • $placaCompletaActual) - Datos autocompletados',
+                                'Vehículo registrado (#$vehiculoIdExistente • $placaCompletaActual)',
                                 style: const TextStyle(
                                   fontSize: 11.5,
                                   color: Color(0xFF166534),
@@ -1393,6 +1394,18 @@ class _HomeScreenState extends State<HomeScreen> {
                       },
                       onSelected: (Map<String, dynamic> cliente) {
                         setModalState(() {
+                          final int? nuevoClienteId =
+                              int.tryParse(cliente['id']?.toString() ?? '');
+                          // Si había una placa cargada de otro cliente, limpiar el vehículo para registrar uno nuevo
+                          if (vehiculoIdExistente != null &&
+                              vehiculoClienteIdExistente != nuevoClienteId) {
+                            cuerpoPlacaCtrl?.clear();
+                            marcaCtrl.clear();
+                            modeloCtrl.clear();
+                            colorCtrl.clear();
+                            vehiculoIdExistente = null;
+                            vehiculoClienteIdExistente = null;
+                          }
                           clienteIdExistente = cliente['id'];
                           if (cliente['telefono'] != null &&
                               cliente['telefono']
