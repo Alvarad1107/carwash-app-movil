@@ -22,9 +22,12 @@ class InventarioModel {
 
   factory InventarioModel.fromJson(Map<String, dynamic> json) {
     return InventarioModel(
-      id: json['id'] is int ? json['id'] : int.tryParse(json['id']?.toString() ?? '0') ?? 0,
+      id: json['id'] is int
+          ? json['id']
+          : int.tryParse(json['id']?.toString() ?? '0') ?? 0,
       codigoSku: json['codigo_sku']?.toString() ?? '',
-      nombreProducto: json['nombre_producto']?.toString() ?? 'Producto sin nombre',
+      nombreProducto:
+          json['nombre_producto']?.toString() ?? 'Producto sin nombre',
       cantidadActual: json['cantidad_actual'] is int
           ? json['cantidad_actual']
           : int.tryParse(json['cantidad_actual']?.toString() ?? '0') ?? 0,
@@ -43,5 +46,6 @@ class InventarioModel {
   bool get esStockCritico => cantidadActual <= stockMinimo;
 
   /// Alerta preventiva: stock bajo pero aún no en nivel crítico (hasta 3 unidades por encima)
-  bool get esStockBajo => !esStockCritico && cantidadActual <= (stockMinimo + 3);
+  bool get esStockBajo =>
+      !esStockCritico && cantidadActual <= (stockMinimo + 3);
 }

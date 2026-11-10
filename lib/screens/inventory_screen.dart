@@ -3,8 +3,9 @@ import '../core/app_colors.dart';
 import '../models/inventario_model.dart';
 import '../services/api_service.dart';
 
-/// Pantalla de Inventario de Insumos en modo "Solo Lectura".
-/// Consulta en tiempo real los insumos del VPS y muestra alertas visuales de stock.
+/// Pantalla de Inventario de Insumos en modo "Solo Lectura" (TDR 4.5).
+/// Consulta en tiempo real los insumos del VPS, verifica sesión activa
+/// y muestra alertas visuales de stock.
 class InventoryScreen extends StatefulWidget {
   const InventoryScreen({super.key});
 
@@ -32,6 +33,9 @@ class _InventoryScreenState extends State<InventoryScreen> {
     });
 
     try {
+      final activo = await _apiService.verificarUsuarioActivo(context);
+      if (!activo || !mounted) return;
+
       final insumos = await _apiService.obtenerInventario();
       if (mounted) {
         setState(() {
@@ -72,7 +76,8 @@ class _InventoryScreenState extends State<InventoryScreen> {
   Widget build(BuildContext context) {
     final int totalCriticos = _insumos.where((i) => i.esStockCritico).length;
     final int totalBajos = _insumos.where((i) => i.esStockBajo).length;
-    final int totalOptimos = _insumos.where((i) => !i.esStockCritico && !i.esStockBajo).length;
+    final int totalOptimos =
+        _insumos.where((i) => !i.esStockCritico && !i.esStockBajo).length;
 
     return Scaffold(
       backgroundColor: Colors.white,
@@ -111,14 +116,17 @@ class _InventoryScreenState extends State<InventoryScreen> {
                       ],
                     ),
                     IconButton(
-                      onPressed: _cargando ? null : () => _cargarInventario(mostrarSnack: true),
+                      onPressed: _cargando
+                          ? null
+                          : () => _cargarInventario(mostrarSnack: true),
                       icon: _cargando
                           ? const SizedBox(
                               width: 18,
                               height: 18,
                               child: CircularProgressIndicator(strokeWidth: 2),
                             )
-                          : const Icon(Icons.sync_rounded, color: AppColors.kRoyalBlue),
+                          : const Icon(Icons.sync_rounded,
+                              color: AppColors.kRoyalBlue),
                       tooltip: 'Sincronizar con VPS',
                     ),
                   ],
@@ -130,8 +138,10 @@ class _InventoryScreenState extends State<InventoryScreen> {
                   onChanged: (val) => setState(() => _filtroBusqueda = val),
                   decoration: InputDecoration(
                     hintText: 'Buscar insumo por nombre o SKU...',
-                    hintStyle: const TextStyle(color: AppColors.textHint, fontSize: 13.5),
-                    prefixIcon: const Icon(Icons.search_rounded, color: AppColors.textMuted),
+                    hintStyle: const TextStyle(
+                        color: AppColors.textHint, fontSize: 13.5),
+                    prefixIcon: const Icon(Icons.search_rounded,
+                        color: AppColors.textMuted),
                     filled: true,
                     fillColor: AppColors.surfaceGrey,
                     contentPadding: const EdgeInsets.symmetric(vertical: 13),
@@ -193,7 +203,8 @@ class _InventoryScreenState extends State<InventoryScreen> {
                           SizedBox(height: 16),
                           Text(
                             'Consultando insumos en el VPS...',
-                            style: TextStyle(color: AppColors.textMuted, fontSize: 13),
+                            style: TextStyle(
+                                color: AppColors.textMuted, fontSize: 13),
                           ),
                         ],
                       ),
@@ -210,16 +221,22 @@ class _InventoryScreenState extends State<InventoryScreen> {
                     ),
                     child: Column(
                       children: [
-                        const Icon(Icons.error_outline_rounded, color: Color(0xFFDC2626), size: 36),
+                        const Icon(
+                          Icons.error_outline_rounded,
+                          color: Color(0xFFDC2626),
+                          size: 36,
+                        ),
                         const SizedBox(height: 10),
                         Text(
                           'Error al consultar el inventario:\n$_error',
                           textAlign: TextAlign.center,
-                          style: const TextStyle(fontSize: 13, color: Color(0xFF991B1B)),
+                          style: const TextStyle(
+                              fontSize: 13, color: Color(0xFF991B1B)),
                         ),
                         const SizedBox(height: 14),
                         ElevatedButton.icon(
-                          onPressed: () => _cargarInventario(mostrarSnack: true),
+                          onPressed: () =>
+                              _cargarInventario(mostrarSnack: true),
                           style: ElevatedButton.styleFrom(
                             backgroundColor: AppColors.kRoyalBlue,
                             foregroundColor: Colors.white,
@@ -236,11 +253,16 @@ class _InventoryScreenState extends State<InventoryScreen> {
                     child: Center(
                       child: Column(
                         children: [
-                          Icon(Icons.inventory_2_outlined, size: 48, color: Colors.grey.shade400),
+                          Icon(
+                            Icons.inventory_2_outlined,
+                            size: 48,
+                            color: Colors.grey.shade400,
+                          ),
                           const SizedBox(height: 12),
                           const Text(
                             'No se encontraron insumos con ese criterio',
-                            style: TextStyle(color: AppColors.textMuted, fontSize: 14),
+                            style: TextStyle(
+                                color: AppColors.textMuted, fontSize: 14),
                           ),
                         ],
                       ),
@@ -259,7 +281,8 @@ class _InventoryScreenState extends State<InventoryScreen> {
                         ),
                       ),
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 3),
                         decoration: BoxDecoration(
                           color: const Color(0xFFF3F4F6),
                           borderRadius: BorderRadius.circular(8),
@@ -339,7 +362,6 @@ class _InventoryScreenState extends State<InventoryScreen> {
   }
 
   Widget _buildInsumoCard(InventarioModel item) {
-    // Definición de colores según el nivel de alerta
     final bool critico = item.esStockCritico;
     final bool bajo = item.esStockBajo;
 
@@ -375,10 +397,14 @@ class _InventoryScreenState extends State<InventoryScreen> {
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: borderColor, width: critico || bajo ? 1.5 : 1.0),
+        border:
+            Border.all(color: borderColor, width: critico || bajo ? 1.5 : 1.0),
         boxShadow: [
           BoxShadow(
-            color: (critico ? const Color(0xFFDC2626) : (bajo ? const Color(0xFFD97706) : Colors.black)).withAlpha(critico || bajo ? 35 : 12),
+            color: (critico
+                    ? const Color(0xFFDC2626)
+                    : (bajo ? const Color(0xFFD97706) : Colors.black))
+                .withAlpha(critico || bajo ? 35 : 12),
             blurRadius: 8,
             offset: const Offset(0, 3),
           ),
@@ -446,22 +472,26 @@ class _InventoryScreenState extends State<InventoryScreen> {
           // Proveedor y Unidad de medida
           Row(
             children: [
-              Icon(Icons.category_outlined, size: 14, color: Colors.grey.shade500),
+              Icon(Icons.category_outlined,
+                  size: 14, color: Colors.grey.shade500),
               const SizedBox(width: 4),
               Text(
                 item.unidadMedida,
-                style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
+                style: const TextStyle(
+                    fontSize: 12, color: AppColors.textSecondary),
               ),
               if (item.proveedor != null && item.proveedor!.isNotEmpty) ...[
                 const SizedBox(width: 12),
-                Icon(Icons.business_outlined, size: 14, color: Colors.grey.shade500),
+                Icon(Icons.business_outlined,
+                    size: 14, color: Colors.grey.shade500),
                 const SizedBox(width: 4),
                 Expanded(
                   child: Text(
                     item.proveedor!,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 12, color: AppColors.textMuted),
+                    style: const TextStyle(
+                        fontSize: 12, color: AppColors.textMuted),
                   ),
                 ),
               ],
@@ -485,7 +515,8 @@ class _InventoryScreenState extends State<InventoryScreen> {
                   children: [
                     const Text(
                       'Stock Disponible',
-                      style: TextStyle(fontSize: 10.5, color: AppColors.textMuted),
+                      style:
+                          TextStyle(fontSize: 10.5, color: AppColors.textMuted),
                     ),
                     const SizedBox(height: 1),
                     Text(
@@ -493,7 +524,9 @@ class _InventoryScreenState extends State<InventoryScreen> {
                       style: TextStyle(
                         fontSize: 15,
                         fontWeight: FontWeight.w800,
-                        color: critico ? const Color(0xFFDC2626) : AppColors.textPrimary,
+                        color: critico
+                            ? const Color(0xFFDC2626)
+                            : AppColors.textPrimary,
                       ),
                     ),
                   ],
@@ -503,7 +536,8 @@ class _InventoryScreenState extends State<InventoryScreen> {
                   children: [
                     const Text(
                       'Nivel Mínimo Requerido',
-                      style: TextStyle(fontSize: 10.5, color: AppColors.textMuted),
+                      style:
+                          TextStyle(fontSize: 10.5, color: AppColors.textMuted),
                     ),
                     const SizedBox(height: 1),
                     Text(

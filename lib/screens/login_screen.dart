@@ -14,22 +14,34 @@ class _LoginScreenState extends State<LoginScreen> {
   final _apiService = ApiService();
 
   final TextEditingController _emailCtrl =
-      TextEditingController(text: 'supervisor@sprintwash.com');
+      TextEditingController(text: 'erick.herrera@sprintwash.local');
   final TextEditingController _passCtrl =
-      TextEditingController(text: '12345678');
+      TextEditingController(text: 'hash_demo_123');
 
   bool _ocultarPassword = true;
   bool _isLoading = false;
 
   Future<void> _iniciarSesion() async {
-    setState(() => _isLoading = true);
     final String email = _emailCtrl.text.trim();
     final String password = _passCtrl.text.trim();
 
-    try {
-      final success = await _apiService.login(email, password);
+    if (email.isEmpty || password.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Por favor ingresa tu correo y contraseña.'),
+          backgroundColor: Colors.redAccent,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
 
-      if (success) {
+    setState(() => _isLoading = true);
+
+    try {
+      final result = await _apiService.login(email, password);
+
+      if (result['success'] == true) {
         if (mounted) {
           Navigator.pushReplacement(
             context,
@@ -38,20 +50,70 @@ class _LoginScreenState extends State<LoginScreen> {
         }
       } else {
         if (mounted) {
+          ScaffoldMessenger.of(context).clearSnackBars();
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Credenciales incorrectas o usuario inactivo')),
+            SnackBar(
+              content: Text(
+                (result['error'] ?? 'Correo o contraseña incorrectos')
+                    .toString(),
+              ),
+              backgroundColor: Colors.redAccent,
+              behavior: SnackBarBehavior.floating,
+            ),
           );
         }
       }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error de conexión: $e')),
+          SnackBar(
+            content: Text('Error de conexión: $e'),
+            backgroundColor: Colors.redAccent,
+            behavior: SnackBarBehavior.floating,
+          ),
         );
       }
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
+  }
+
+  void _mostrarDialogoOlvidoPassword() {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+        title: const Row(
+          children: [
+            Icon(Icons.lock_reset_rounded, color: AppColors.kRoyalBlue),
+            SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'Restablecer contraseña',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+              ),
+            ),
+          ],
+        ),
+        content: const Text(
+          'Por seguridad, solicita el restablecimiento de tu contraseña al Administrador General en el panel administrativo.',
+          style: TextStyle(
+              fontSize: 13.5, color: AppColors.textSecondary, height: 1.4),
+        ),
+        actions: [
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.kRoyalBlue,
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10)),
+            ),
+            child: const Text('Entendido'),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -100,6 +162,7 @@ class _LoginScreenState extends State<LoginScreen> {
               const SizedBox(height: 8),
               TextField(
                 controller: _emailCtrl,
+                keyboardType: TextInputType.emailAddress,
                 decoration: InputDecoration(
                   prefixIcon: const Icon(
                     Icons.mail_outline_rounded,
@@ -115,7 +178,8 @@ class _LoginScreenState extends State<LoginScreen> {
                   ),
                   focusedBorder: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(14),
-                    borderSide: const BorderSide(color: AppColors.kRoyalBlue, width: 1.5),
+                    borderSide: const BorderSide(
+                        color: AppColors.kRoyalBlue, width: 1.5),
                   ),
                 ),
               ),
@@ -161,7 +225,8 @@ class _LoginScreenState extends State<LoginScreen> {
                   ),
                   focusedBorder: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(14),
-                    borderSide: const BorderSide(color: AppColors.kRoyalBlue, width: 1.5),
+                    borderSide: const BorderSide(
+                        color: AppColors.kRoyalBlue, width: 1.5),
                   ),
                 ),
               ),
@@ -169,7 +234,7 @@ class _LoginScreenState extends State<LoginScreen> {
               Align(
                 alignment: Alignment.centerRight,
                 child: TextButton(
-                  onPressed: () {},
+                  onPressed: _mostrarDialogoOlvidoPassword,
                   child: const Text(
                     '¿Olvidaste tu contraseña?',
                     style: TextStyle(
@@ -199,7 +264,8 @@ class _LoginScreenState extends State<LoginScreen> {
                   onPressed: _isLoading ? null : _iniciarSesion,
                   style: ElevatedButton.styleFrom(
                     backgroundColor: AppColors.kRoyalBlue,
-                    disabledBackgroundColor: AppColors.kRoyalBlue.withAlpha(178),
+                    disabledBackgroundColor:
+                        AppColors.kRoyalBlue.withAlpha(178),
                     foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(vertical: 16),
                     shape: RoundedRectangleBorder(

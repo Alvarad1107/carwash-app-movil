@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../core/app_colors.dart';
 import '../core/app_constants.dart';
 import '../models/vehiculo_patio.dart';
@@ -6,6 +7,45 @@ import '../models/servicio_extra_model.dart';
 import '../services/api_service.dart';
 import 'login_screen.dart';
 import 'inventory_screen.dart';
+
+/// Formateador para cuerpo de placa salvadoreña: solo alfanuméricos en mayúscula (máx. 6).
+class _CuerpoPlacaInputFormatter extends TextInputFormatter {
+  @override
+  TextEditingValue formatEditUpdate(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    final limpio =
+        newValue.text.toUpperCase().replaceAll(RegExp(r'[^A-Z0-9]'), '');
+    final truncado = limpio.length > 6 ? limpio.substring(0, 6) : limpio;
+    return TextEditingValue(
+      text: truncado,
+      selection: TextSelection.collapsed(offset: truncado.length),
+    );
+  }
+}
+
+/// Formateador automático de teléfono salvadoreño: 8 dígitos con máscara 0000-0000.
+class _TelefonoSVInputFormatter extends TextInputFormatter {
+  @override
+  TextEditingValue formatEditUpdate(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    final digitos = newValue.text.replaceAll(RegExp(r'\D'), '');
+    final truncado = digitos.length > 8 ? digitos.substring(0, 8) : digitos;
+    String formateado;
+    if (truncado.length > 4) {
+      formateado = '${truncado.substring(0, 4)}-${truncado.substring(4)}';
+    } else {
+      formateado = truncado;
+    }
+    return TextEditingValue(
+      text: formateado,
+      selection: TextSelection.collapsed(offset: formateado.length),
+    );
+  }
+}
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -19,6 +59,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   bool _cargandoApi = false;
   bool _conectadoConApi = false;
+  int _perfilUsuarioId = 0;
   String _perfilNombre = 'Cargando...';
   String _perfilRol = '';
   String _perfilCorreo = '';
@@ -28,12 +69,19 @@ class _HomeScreenState extends State<HomeScreen> {
   String _filtroControl = 'Todos';
 
   double _totalComisionesOperarios = 0.0;
-  double _totalCobradoHoy = 0.0;
   int _cantidadLavadosComision = 0;
+  int _lavadosTerminadosHoy = 0;
+  int _vehiculosEnPatio = 0;
 
-  // Listas en memoria RAM para autocompletado predictivo instantáneo
+  // Catálogos y listas en memoria RAM sincronizadas desde la API
   List<dynamic> _listaClientesLocal = [];
   List<dynamic> _listaVehiculosLocal = [];
+  List<dynamic> _bahiasApi = [];
+  List<Map<String, dynamic>> _categoriasApi = [];
+  List<Map<String, dynamic>> _serviciosBaseApi = [];
+  List<ServicioExtraModel> _serviciosAdicionalesApi = [];
+  List<Map<String, dynamic>> _operariosActivos = [];
+  Set<int> _ordenesComisionadasIds = {};
 
   static const List<IconData> _iconosFase = [
     Icons.hourglass_top_rounded,
@@ -43,19 +91,55 @@ class _HomeScreenState extends State<HomeScreen> {
 
   List<VehiculoPatio> _vehiculos = [];
 
+  /// Determina si una bahía está en estado "Mantenimiento" según GET /bahias/
+  bool _bahiaEnMantenimiento(int numero) {
+    for (final b in _bahiasApi) {
+      final int bid = int.tryParse(b['id']?.toString() ?? '0') ?? 0;
+      if (bid == numero) {
+        final String est = (b['estado'] ?? '').toString().toLowerCase();
+        return est.contains('mantenimiento');
+      }
+    }
+    return false;
+  }
+
   /// Determina si una bahía está ocupada por un vehículo en proceso o pendiente
   bool _bahiaOcupada(int numero) {
     return _vehiculos.any((v) =>
-        (v.bahia == 'Bahia $numero' || v.bahia == 'Bahía $numero') &&
+        (v.bahiaId == numero ||
+            v.bahia == 'Bahia $numero' ||
+            v.bahia == 'Bahía $numero') &&
         (v.fase == 1 || v.fase == 0));
   }
 
-  /// Busca de forma inteligente la primera bahía libre (1 a 6) para evitar bloqueos
+  /// Busca de forma inteligente la primera bahía libre (1 a 6) que no esté ocupada ni en mantenimiento
   int? _primeraBahiaLibre() {
     for (int i = 1; i <= AppConstants.totalBahias; i++) {
-      if (!_bahiaOcupada(i)) return i;
+      if (!_bahiaOcupada(i) && !_bahiaEnMantenimiento(i)) return i;
     }
     return null;
+  }
+
+  /// Busca si una placa ya tiene una orden activa en patio (Pendiente o En proceso)
+  VehiculoPatio? _buscarOrdenActivaPorPlaca(String placaCompleta) {
+    final norm = ApiService.normalizarPlacaSV(placaCompleta);
+    for (final v in _vehiculos) {
+      if ((v.fase == 0 || v.fase == 1) &&
+          ApiService.normalizarPlacaSV(v.placa) == norm) {
+        return v;
+      }
+    }
+    return null;
+  }
+
+  /// Formatea cualquier teléfono a 0000-0000 si tiene 8 dígitos
+  String _formatearTelefonoSV(String raw) {
+    final digitos = raw.replaceAll(RegExp(r'\D'), '');
+    if (digitos.length >= 8) {
+      final d8 = digitos.substring(digitos.length - 8);
+      return '${d8.substring(0, 4)}-${d8.substring(4)}';
+    }
+    return raw.trim();
   }
 
   @override
@@ -67,29 +151,55 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _cargarDatosPerfil() async {
     final perfil = await _apiService.getPerfilData();
+    if (!mounted) return;
     setState(() {
-      _perfilNombre = perfil['nombre']!;
-      _perfilRol = perfil['rol']!;
-      _perfilCorreo = perfil['correo']!;
+      _perfilUsuarioId = (perfil['usuario_id'] as int?) ?? 0;
+      _perfilNombre = (perfil['nombre'] ?? 'Usuario').toString();
+      _perfilRol = (perfil['rol'] ?? 'Sin Rol').toString();
+      _perfilCorreo = (perfil['correo'] ?? 'Sin Correo').toString();
     });
   }
 
   Future<void> _obtenerDatosDeApi({bool mostrarMensaje = false}) async {
     setState(() => _cargandoApi = true);
     try {
-      final result = await _apiService.obtenerDatosPatio();
+      // Candado de seguridad: verificar si el usuario fue desactivado por el Administrador
+      final activo = await _apiService.verificarUsuarioActivo(context);
+      if (!activo || !mounted) return;
 
-      // Cargar directorio de clientes y vehículos para autocompletado en memoria RAM
-      final directorio = await _apiService.obtenerDirectorio();
+      final result = await _apiService.obtenerDatosPatio();
+      if (!mounted) return;
+
+      if (result['usuarioInactivo'] == true) {
+        await _apiService.verificarUsuarioActivo(context);
+        return;
+      }
 
       if (result['success'] == true) {
         setState(() {
-          _vehiculos = result['vehiculos'];
-          _totalCobradoHoy = result['totalCobradoHoy'];
-          _totalComisionesOperarios = result['totalComisionesOperarios'];
-          _cantidadLavadosComision = result['cantidadLavadosComision'];
-          _listaClientesLocal = directorio['clientes'] ?? [];
-          _listaVehiculosLocal = directorio['vehiculos'] ?? [];
+          _vehiculos = result['vehiculos'] as List<VehiculoPatio>;
+          _lavadosTerminadosHoy = (result['lavadosTerminadosHoy'] as int?) ?? 0;
+          _vehiculosEnPatio = (result['vehiculosEnPatio'] as int?) ?? 0;
+          _totalComisionesOperarios =
+              (result['totalComisionesOperarios'] as num?)?.toDouble() ?? 0.0;
+          _cantidadLavadosComision =
+              (result['cantidadLavadosComision'] as int?) ?? 0;
+          _ordenesComisionadasIds =
+              (result['ordenesComisionadasIds'] as Set<int>?) ?? {};
+          _operariosActivos =
+              (result['operariosActivos'] as List<Map<String, dynamic>>?) ?? [];
+          _bahiasApi = (result['bahias'] as List<dynamic>?) ?? [];
+          _categoriasApi =
+              (result['categorias'] as List<Map<String, dynamic>>?) ?? [];
+          _serviciosBaseApi =
+              (result['serviciosBase'] as List<Map<String, dynamic>>?) ?? [];
+          _serviciosAdicionalesApi =
+              (result['serviciosAdicionales'] as List<ServicioExtraModel>?) ??
+                  ServicioExtraModel.obtenerListaDefecto();
+          _listaClientesLocal =
+              (result['clientesDirectorio'] as List<dynamic>?) ?? [];
+          _listaVehiculosLocal =
+              (result['vehiculosDirectorio'] as List<dynamic>?) ?? [];
           _conectadoConApi = true;
         });
 
@@ -97,7 +207,8 @@ class _HomeScreenState extends State<HomeScreen> {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
               backgroundColor: Color(0xFF15803D),
-              content: Text('Sincronizado en tiempo real con VPS de Sprint Wash'),
+              content:
+                  Text('Sincronizado en tiempo real con VPS de Sprint Wash'),
               duration: Duration(seconds: 2),
             ),
           );
@@ -115,7 +226,7 @@ class _HomeScreenState extends State<HomeScreen> {
         }
       }
     } catch (_) {
-      setState(() => _conectadoConApi = false);
+      if (mounted) setState(() => _conectadoConApi = false);
       if (mostrarMensaje && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -130,7 +241,72 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  /// Muestra el AlertDialog de confirmación obligatoria (TDR 4.1 y 4.4)
+  /// antes de avanzar el estado de la orden de forma unidireccional.
+  Future<void> _confirmarCambioEstado(VehiculoPatio v, int nuevaFase) async {
+    // Regla de flujo unidireccional estricto: prohibido retroceder estados
+    if (nuevaFase <= v.fase) return;
+
+    final String titulo = nuevaFase == 1
+        ? 'Confirmar inicio de lavado'
+        : 'Confirmar lavado terminado';
+    final String mensaje = nuevaFase == 1
+        ? '¿Iniciar lavado de ${v.placa} en ${v.bahia}?'
+        : '¿Marcar lavado de ${v.placa} como TERMINADO? Se liberará la ${v.bahia} y se enviará automáticamente el correo con la pre-factura al cliente.';
+
+    final bool? confirmar = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+        title: Row(
+          children: [
+            Icon(
+              nuevaFase == 1
+                  ? Icons.play_circle_fill_rounded
+                  : Icons.check_circle_rounded,
+              color: AppColors.coloresFase[nuevaFase],
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                titulo,
+                style:
+                    const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              ),
+            ),
+          ],
+        ),
+        content: Text(
+          mensaje,
+          style: const TextStyle(
+              fontSize: 13.5, color: AppColors.textSecondary, height: 1.4),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancelar'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.coloresFase[nuevaFase],
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10)),
+            ),
+            child: Text(nuevaFase == 1 ? 'Sí, iniciar' : 'Sí, terminar'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmar == true) {
+      await _cambiarEstado(v, nuevaFase);
+    }
+  }
+
   Future<void> _cambiarEstado(VehiculoPatio v, int nuevaFase) async {
+    if (nuevaFase <= v.fase) return;
     try {
       final success = await _apiService.cambiarEstadoOrden(
         v.ordenId,
@@ -145,128 +321,290 @@ class _HomeScreenState extends State<HomeScreen> {
           SnackBar(
             behavior: SnackBarBehavior.floating,
             backgroundColor: AppColors.coloresFase[v.fase],
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            shape:
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
             content: Text(
               v.fase == 2
-                  ? '${v.nombreCompletoCarro} (${v.placa}) -> LISTO PARA ENTREGA\nPre-factura enviada'
+                  ? '${v.nombreCompletoCarro} (${v.placa}) -> LISTO PARA ENTREGA\nBahía liberada y pre-factura enviada'
                   : '${v.nombreCompletoCarro} (${v.placa}) -> ${AppConstants.nombresFase[v.fase].toUpperCase()}',
-              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12.5),
+              style:
+                  const TextStyle(fontWeight: FontWeight.bold, fontSize: 12.5),
             ),
             duration: const Duration(seconds: 3),
           ),
         );
+        await _obtenerDatosDeApi();
       }
     } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Error de conexión')),
+          const SnackBar(
+              content: Text('Error de conexión al actualizar estado')),
         );
       }
     }
   }
 
-  Future<void> _abrirModalCobro(VehiculoPatio v) async {
+  /// Modal para asignar 1 operario (Lavado Individual) o 2+ operarios (Lavado Simultáneo)
+  /// a una orden terminada (fase == 2), respetando el candado de inmutabilidad.
+  Future<void> _abrirModalAsignarOperarios(VehiculoPatio v) async {
     if (v.fase != 2) {
       ScaffoldMessenger.of(context).clearSnackBars();
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('⚠️ No se permite cobrar: El vehículo aún no está finalizado.'),
+          content: Text(
+            '⚠️ Operación bloqueada: El lavado debe estar Terminado antes de asignar operarios.',
+          ),
           backgroundColor: Colors.redAccent,
           behavior: SnackBarBehavior.floating,
-          duration: Duration(seconds: 3),
         ),
       );
       return;
     }
 
-    String metodoSeleccionado = 'Efectivo';
-    bool seleccionoDosOperarios = false;
+    if (v.comisionada || _ordenesComisionadasIds.contains(v.ordenId)) {
+      ScaffoldMessenger.of(context).clearSnackBars();
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            '🔒 Comisión cerrada: La comisión de esta orden ya fue distribuida y es inmutable.',
+          ),
+          backgroundColor: Colors.redAccent,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
+
+    final List<Map<String, dynamic>> operariosDisponibles =
+        _operariosActivos.isNotEmpty
+            ? _operariosActivos
+            : [
+                {
+                  'id': 3,
+                  'nombre_completo': 'Erick Herrera',
+                  'rol_id': 3,
+                  'estado': 1
+                },
+                {
+                  'id': 4,
+                  'nombre_completo': 'Edenilson Escamilla',
+                  'rol_id': 3,
+                  'estado': 1
+                },
+              ];
+
+    final Set<int> seleccionados = {};
+    // Preseleccionar al operario logueado si está en la lista de operarios activos
+    for (final op in operariosDisponibles) {
+      final int opId = int.tryParse(op['id']?.toString() ?? '0') ?? 0;
+      if (opId == _perfilUsuarioId && opId > 0) {
+        seleccionados.add(opId);
+      }
+    }
+    if (seleccionados.isEmpty && operariosDisponibles.isNotEmpty) {
+      final int primerId =
+          int.tryParse(operariosDisponibles.first['id']?.toString() ?? '3') ??
+              3;
+      seleccionados.add(primerId);
+    }
+
+    bool enviando = false;
 
     await showDialog(
       context: context,
-      builder: (context) {
+      builder: (ctx) {
         return StatefulBuilder(
-          builder: (context, setDialogState) {
+          builder: (ctx, setDialogState) {
+            final bool esSimultaneo = seleccionados.length >= 2;
             return AlertDialog(
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(20)),
               title: Text(
-                'Cobrar Orden #${v.ordenId} (${v.placa})',
-                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                'Asignar Operarios • Orden #${v.ordenId}',
+                style:
+                    const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
               ),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('Cliente: ${v.cliente}', style: const TextStyle(fontSize: 13, color: AppColors.textSecondary)),
-                  const SizedBox(height: 6),
-                  Text(
-                    'Total a cobrar: ${v.totalPagar}',
-                    style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: AppColors.kRoyalBlue),
-                  ),
-                  const SizedBox(height: 14),
-                  DropdownButtonFormField<String>(
-                    value: metodoSeleccionado,
-                    decoration: const InputDecoration(labelText: 'Método de Pago', border: OutlineInputBorder()),
-                    items: const [
-                      DropdownMenuItem(value: 'Efectivo', child: Text('Efectivo')),
-                      DropdownMenuItem(value: 'Tarjeta', child: Text('Tarjeta')),
-                      DropdownMenuItem(value: 'Transferencia', child: Text('Transferencia / QR')),
+              content: SizedBox(
+                width: double.maxFinite,
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '${v.placa} • ${v.nombreCompletoCarro} (${v.categoria})',
+                        style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                          color: AppColors.textPrimary,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: esSimultaneo
+                              ? const Color(0xFFDBEAFE)
+                              : const Color(0xFFDCFCE7),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(
+                              esSimultaneo
+                                  ? Icons.groups_rounded
+                                  : Icons.person_rounded,
+                              size: 18,
+                              color: esSimultaneo
+                                  ? AppColors.kRoyalBlue
+                                  : AppColors.successDark,
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                seleccionados.isEmpty
+                                    ? 'Selecciona al menos 1 operario activo'
+                                    : esSimultaneo
+                                        ? 'Lavado Simultáneo (${seleccionados.length} operarios: división equitativa automática)'
+                                        : 'Lavado Individual (100% de comisión al operario)',
+                                style: TextStyle(
+                                  fontSize: 11.5,
+                                  fontWeight: FontWeight.w700,
+                                  color: esSimultaneo
+                                      ? AppColors.kRoyalBlue
+                                      : AppColors.successDark,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      const Text(
+                        'Operarios Activos en Turno:',
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w700,
+                          color: AppColors.textSecondary,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Container(
+                        decoration: BoxDecoration(
+                          border: Border.all(color: AppColors.border),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: operariosDisponibles.map((op) {
+                            final int opId =
+                                int.tryParse(op['id']?.toString() ?? '0') ?? 0;
+                            final String nombreOp =
+                                (op['nombre_completo'] ?? 'Operario #$opId')
+                                    .toString();
+                            final bool marcado = seleccionados.contains(opId);
+
+                            return CheckboxListTile(
+                              dense: true,
+                              activeColor: AppColors.kRoyalBlue,
+                              value: marcado,
+                              title: Text(
+                                nombreOp,
+                                style: const TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              subtitle: Text(
+                                opId == _perfilUsuarioId
+                                    ? 'Operario en sesión actual'
+                                    : 'Operario activo',
+                                style: const TextStyle(
+                                    fontSize: 11, color: AppColors.textMuted),
+                              ),
+                              onChanged: enviando
+                                  ? null
+                                  : (val) {
+                                      setDialogState(() {
+                                        if (val == true) {
+                                          seleccionados.add(opId);
+                                        } else {
+                                          seleccionados.remove(opId);
+                                        }
+                                      });
+                                    },
+                            );
+                          }).toList(),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      const Text(
+                        'Nota: Una vez cerrada la comisión en planilla, quedará bloqueada contra modificaciones.',
+                        style:
+                            TextStyle(fontSize: 11, color: AppColors.textMuted),
+                      ),
                     ],
-                    onChanged: (val) {
-                      if (val != null) setDialogState(() => metodoSeleccionado = val);
-                    },
                   ),
-                  const SizedBox(height: 12),
-                  SwitchListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('Lavado Simultáneo (2 Operarios)', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-                    subtitle: const Text('Divide automáticamente la comisión en planilla', style: TextStyle(fontSize: 11.5)),
-                    value: seleccionoDosOperarios,
-                    onChanged: (val) => setDialogState(() => seleccionoDosOperarios = val),
-                  ),
-                ],
+                ),
               ),
               actions: [
-                TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancelar')),
+                TextButton(
+                  onPressed: enviando ? null : () => Navigator.pop(ctx),
+                  child: const Text('Cancelar'),
+                ),
                 ElevatedButton(
-                  onPressed: () async {
-                    try {
-                      final resPago = await _apiService.registrarPago(
-                        ordenId: v.ordenId,
-                        metodoPago: metodoSeleccionado,
-                        monto: v.montoNumerico,
-                      );
-
-                      if (resPago['success'] != true) {
-                        if (context.mounted) Navigator.pop(context);
-                        if (mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(content: Text('Error: ${resPago['error']}'), backgroundColor: Colors.redAccent),
+                  onPressed: (enviando || seleccionados.isEmpty)
+                      ? null
+                      : () async {
+                          setDialogState(() => enviando = true);
+                          final res = await _apiService.asignarOperarios(
+                            ordenId: v.ordenId,
+                            operariosIds: seleccionados.toList(),
                           );
-                        }
-                        return;
-                      }
+                          if (!ctx.mounted) return;
+                          Navigator.pop(ctx);
 
-                      await _apiService.asignarOperarios(
-                        ordenId: v.ordenId,
-                        dosOperarios: seleccionoDosOperarios,
-                      );
-
-                      if (context.mounted) Navigator.pop(context);
-                      await _obtenerDatosDeApi(mostrarMensaje: true);
-                    } catch (_) {
-                      if (mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('Error de conexión')),
-                        );
-                      }
-                    }
-                  },
+                          if (res['success'] == true) {
+                            setState(() {
+                              v.comisionada = true;
+                              _ordenesComisionadasIds.add(v.ordenId);
+                            });
+                            if (mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  backgroundColor: AppColors.success,
+                                  content: Text(
+                                    'Comisión distribuida y cerrada en planilla correctamente',
+                                  ),
+                                ),
+                              );
+                            }
+                            await _obtenerDatosDeApi();
+                          } else {
+                            if (mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  backgroundColor: Colors.redAccent,
+                                  content: Text('Error: ${res['error']}'),
+                                ),
+                              );
+                            }
+                          }
+                        },
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: AppColors.success,
+                    backgroundColor: AppColors.kRoyalBlue,
                     foregroundColor: Colors.white,
                   ),
-                  child: const Text('Confirmar Cobro'),
+                  child: enviando
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                              color: Colors.white, strokeWidth: 2),
+                        )
+                      : const Text('Cerrar Comisión'),
                 ),
               ],
             );
@@ -276,16 +614,18 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  /// Modal de Recepción de Vehículo refactorizado con autocompletado predictivo de placas y clientes,
-  /// catálogo oficial actualizado, servicios extras, teléfono obligatorio y asignación inteligente de bahías.
+  /// Modal de Recepción de Vehículo con selector estricto de placa SV (19 prefijos + máx 6 alfanuméricos),
+  /// bloqueo de orden duplicada en patio, selector de Servicio Base (Tabla 5.1),
+  /// teléfono con máscara 0000-0000 y correo electrónico para pre-factura.
   void _abrirModalRecepcion() {
-    // Asignación inteligente: buscar primera bahía libre entre las 6 disponibles
     final int? bahiaLibre = _primeraBahiaLibre();
     if (bahiaLibre == null) {
       ScaffoldMessenger.of(context).clearSnackBars();
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('⚠️ Todas las bahías (1 a 6) están ocupadas. No es posible recibir más vehículos hasta que se libere una bahía.'),
+          content: Text(
+            '⚠️ Todas las bahías disponibles están ocupadas o en mantenimiento. Finaliza un lavado antes de recibir otro vehículo.',
+          ),
           backgroundColor: Colors.redAccent,
           behavior: SnackBarBehavior.floating,
           duration: Duration(seconds: 4),
@@ -294,38 +634,118 @@ class _HomeScreenState extends State<HomeScreen> {
       return;
     }
 
-    // Variables de control de duplicados y autocompletado
     int? vehiculoIdExistente;
     int? clienteIdExistente;
 
-    // Controladores de texto
-    TextEditingController? placaInputCtrl;
+    String prefijoSeleccionado = 'P';
+    TextEditingController? cuerpoPlacaCtrl;
     TextEditingController? clienteInputCtrl;
     final marcaCtrl = TextEditingController();
     final modeloCtrl = TextEditingController();
     final colorCtrl = TextEditingController();
     final telefonoCtrl = TextEditingController();
+    final correoCtrl = TextEditingController();
 
-    // Catálogo de categorías oficiales:
-    // Motocicleta ($1.50) [6], Sedán ($4.00) [1], Pick Up ($8.00) [2],
-    // Carros Medianos ($6.00) [3], Carros Grandes ($8.00) [4], Microbús ($10.00) [5]
     int categoriaIdSeleccionada = 1;
+    int servicioBaseIdSeleccionado = 1;
 
-    // Catálogo oficial de servicios adicionales (Extras)
-    final List<ServicioExtraModel> extras = ServicioExtraModel.obtenerListaDefecto();
+    final List<ServicioExtraModel> extras = (_serviciosAdicionalesApi.isNotEmpty
+            ? _serviciosAdicionalesApi
+            : ServicioExtraModel.obtenerListaDefecto())
+        .map((e) => ServicioExtraModel(
+              id: e.id,
+              nombre: e.nombre,
+              precio: e.precio,
+              comisionExtra: e.comisionExtra,
+              seleccionado: false,
+            ))
+        .toList();
+
+    final List<Map<String, dynamic>> serviciosBaseOpciones =
+        _serviciosBaseApi.isNotEmpty
+            ? _serviciosBaseApi
+            : [
+                {'id': 1, 'nombre': 'Lavado Básico'},
+                {'id': 2, 'nombre': 'Pasteado a Mano'},
+                {'id': 3, 'nombre': 'Pasteado a Máquina'},
+              ];
 
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
       builder: (context) {
         return StatefulBuilder(
           builder: (context, setModalState) {
-            // Cálculo dinámico de totales estimados en vivo
-            final double precioBaseEst = ApiService.precioBaseCategoria(categoriaIdSeleccionada);
-            final double totalExtrasEst = extras.where((e) => e.seleccionado).fold(0.0, (acc, e) => acc + e.precio);
+            final String cuerpoActual = (cuerpoPlacaCtrl?.text ?? '')
+                .trim()
+                .toUpperCase()
+                .replaceAll(RegExp(r'[^A-Z0-9]'), '');
+            final String placaCompletaActual = cuerpoActual.isNotEmpty
+                ? '$prefijoSeleccionado-$cuerpoActual'
+                : '';
+
+            // Verificar si el vehículo ya tiene una orden activa en patio (fase 0 o 1)
+            final VehiculoPatio? ordenActivaPatio =
+                placaCompletaActual.isNotEmpty
+                    ? _buscarOrdenActivaPorPlaca(placaCompletaActual)
+                    : null;
+
+            // Cálculo dinámico de precios según Matriz (Tabla 5.1) + Extras + 13% IVA
+            final double precioBaseEst = _apiService.obtenerPrecioMatriz(
+              categoriaIdSeleccionada,
+              servicioBaseIdSeleccionado,
+            );
+            final double totalExtrasEst = extras
+                .where((e) => e.seleccionado)
+                .fold(0.0, (acc, e) => acc + e.precio);
             final double subtotalEst = precioBaseEst + totalExtrasEst;
             final double totalConIvaEst = subtotalEst * 1.13;
+
+            void sincronizarVehiculoPorPlaca(String placaCompleta) {
+              final norm = ApiService.normalizarPlacaSV(placaCompleta);
+              Map<String, dynamic>? encontrado;
+              for (final v in _listaVehiculosLocal) {
+                if (ApiService.normalizarPlacaSV(
+                        (v['placa'] ?? '').toString()) ==
+                    norm) {
+                  encontrado = Map<String, dynamic>.from(v as Map);
+                  break;
+                }
+              }
+              if (encontrado != null) {
+                vehiculoIdExistente = encontrado['id'];
+                marcaCtrl.text = (encontrado['marca'] ?? '').toString();
+                modeloCtrl.text = (encontrado['modelo'] ?? '').toString();
+                colorCtrl.text = (encontrado['color'] ?? '').toString();
+                final int? catId = int.tryParse(
+                  encontrado['categoria_vehiculo_id']?.toString() ?? '',
+                );
+                if (catId != null && catId >= 1 && catId <= 6) {
+                  categoriaIdSeleccionada = catId;
+                }
+                final clienteId = encontrado['cliente_id'];
+                if (clienteId != null) {
+                  final cliente = _listaClientesLocal.firstWhere(
+                    (c) => c['id'] == clienteId,
+                    orElse: () => null,
+                  );
+                  if (cliente != null) {
+                    clienteIdExistente = cliente['id'];
+                    clienteInputCtrl?.text =
+                        (cliente['nombre_completo'] ?? '').toString();
+                    telefonoCtrl.text = _formatearTelefonoSV(
+                      (cliente['telefono'] ?? '').toString(),
+                    );
+                    correoCtrl.text = (cliente['correo'] ?? '').toString();
+                  }
+                }
+              } else {
+                vehiculoIdExistente = null;
+              }
+            }
 
             return Padding(
               padding: EdgeInsets.only(
@@ -345,10 +765,12 @@ class _HomeScreenState extends State<HomeScreen> {
                       children: [
                         const Text(
                           'Recepción de Vehículo',
-                          style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                          style: TextStyle(
+                              fontSize: 18, fontWeight: FontWeight.bold),
                         ),
                         Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 10, vertical: 5),
                           decoration: BoxDecoration(
                             color: const Color(0xFFDCFCE7),
                             borderRadius: BorderRadius.circular(10),
@@ -356,7 +778,11 @@ class _HomeScreenState extends State<HomeScreen> {
                           ),
                           child: Row(
                             children: [
-                              const Icon(Icons.meeting_room_rounded, size: 14, color: Color(0xFF15803D)),
+                              const Icon(
+                                Icons.meeting_room_rounded,
+                                size: 14,
+                                color: Color(0xFF15803D),
+                              ),
                               const SizedBox(width: 4),
                               Text(
                                 'Bahía $bahiaLibre (Libre)',
@@ -373,11 +799,43 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                     const SizedBox(height: 12),
 
-                    // Badges informativos de autocompletado si se detectó registro existente
-                    if (vehiculoIdExistente != null)
+                    // Alerta Roja Inmediata si el vehículo ya está en lavado en patio
+                    if (ordenActivaPatio != null)
                       Container(
                         margin: const EdgeInsets.only(bottom: 10),
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFFEE2E2),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: const Color(0xFFF87171)),
+                        ),
+                        child: Row(
+                          children: [
+                            const Icon(
+                              Icons.block_rounded,
+                              size: 18,
+                              color: Color(0xFFDC2626),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                'Este vehículo ya está en lavado en ${ordenActivaPatio.bahia} (${AppConstants.nombresFase[ordenActivaPatio.fase]}).',
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  color: Color(0xFF991B1B),
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      )
+                    else if (vehiculoIdExistente != null)
+                      Container(
+                        margin: const EdgeInsets.only(bottom: 10),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 6),
                         decoration: BoxDecoration(
                           color: const Color(0xFFDCFCE7),
                           borderRadius: BorderRadius.circular(8),
@@ -385,12 +843,20 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                         child: Row(
                           children: [
-                            const Icon(Icons.verified_rounded, size: 15, color: Color(0xFF15803D)),
+                            const Icon(
+                              Icons.verified_rounded,
+                              size: 15,
+                              color: Color(0xFF15803D),
+                            ),
                             const SizedBox(width: 6),
                             Expanded(
                               child: Text(
-                                'Vehículo existente (#$vehiculoIdExistente) - No se duplicará en base de datos',
-                                style: const TextStyle(fontSize: 11.5, color: Color(0xFF166534), fontWeight: FontWeight.bold),
+                                'Vehículo registrado (#$vehiculoIdExistente • $placaCompletaActual) - Datos autocompletados',
+                                style: const TextStyle(
+                                  fontSize: 11.5,
+                                  color: Color(0xFF166534),
+                                  fontWeight: FontWeight.bold,
+                                ),
                               ),
                             ),
                           ],
@@ -399,7 +865,8 @@ class _HomeScreenState extends State<HomeScreen> {
                     else if (clienteIdExistente != null)
                       Container(
                         margin: const EdgeInsets.only(bottom: 10),
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 6),
                         decoration: BoxDecoration(
                           color: const Color(0xFFDBEAFE),
                           borderRadius: BorderRadius.circular(8),
@@ -407,80 +874,177 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                         child: Row(
                           children: [
-                            const Icon(Icons.person_pin_rounded, size: 15, color: AppColors.kRoyalBlue),
+                            const Icon(
+                              Icons.person_pin_rounded,
+                              size: 15,
+                              color: AppColors.kRoyalBlue,
+                            ),
                             const SizedBox(width: 6),
                             Expanded(
                               child: Text(
-                                'Cliente existente (#$clienteIdExistente) - El nuevo auto se asociará a este cliente',
-                                style: const TextStyle(fontSize: 11.5, color: Color(0xFF1E40AF), fontWeight: FontWeight.bold),
+                                'Cliente existente (#$clienteIdExistente) - Se asociará a este cliente',
+                                style: const TextStyle(
+                                  fontSize: 11.5,
+                                  color: Color(0xFF1E40AF),
+                                  fontWeight: FontWeight.bold,
+                                ),
                               ),
                             ),
                           ],
                         ),
                       ),
 
-                    // Autocompletado de Placa (Widget nativo Autocomplete) y Color
+                    // Selector de Prefijo SV (19 opciones) + Cuerpo Alfanumérico (máx 6) + Color
                     Row(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
+                        SizedBox(
+                          width: 88,
+                          child: DropdownButtonFormField<String>(
+                            // ignore: deprecated_member_use
+                            value: prefijoSeleccionado,
+                            isDense: true,
+                            decoration: const InputDecoration(
+                              labelText: 'Prefijo',
+                              contentPadding: EdgeInsets.symmetric(
+                                  horizontal: 10, vertical: 15),
+                              border: OutlineInputBorder(),
+                            ),
+                            items: AppConstants.prefijosPlacaSV
+                                .map(
+                                  (p) => DropdownMenuItem<String>(
+                                    value: p,
+                                    child: Text(
+                                      p,
+                                      style: const TextStyle(
+                                        fontWeight: FontWeight.w800,
+                                        fontSize: 13.5,
+                                      ),
+                                    ),
+                                  ),
+                                )
+                                .toList(),
+                            onChanged: (val) {
+                              if (val != null) {
+                                setModalState(() {
+                                  prefijoSeleccionado = val;
+                                  final c = (cuerpoPlacaCtrl?.text ?? '')
+                                      .trim()
+                                      .toUpperCase();
+                                  if (c.isNotEmpty) {
+                                    sincronizarVehiculoPorPlaca(
+                                        '$prefijoSeleccionado-$c');
+                                  }
+                                });
+                              }
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 8),
                         Expanded(
                           flex: 3,
                           child: Autocomplete<Map<String, dynamic>>(
-                            displayStringForOption: (option) => (option['placa'] ?? '').toString(),
-                            optionsBuilder: (TextEditingValue textEditingValue) {
-                              if (textEditingValue.text.trim().isEmpty) {
-                                return const Iterable<Map<String, dynamic>>.empty();
+                            displayStringForOption: (option) {
+                              final partes = ApiService.separarPlacaSV(
+                                (option['placa'] ?? '').toString(),
+                              );
+                              return partes['cuerpo'] ?? '';
+                            },
+                            optionsBuilder:
+                                (TextEditingValue textEditingValue) {
+                              final raw =
+                                  textEditingValue.text.trim().toUpperCase();
+                              if (raw.isEmpty) {
+                                return const Iterable<
+                                    Map<String, dynamic>>.empty();
                               }
-                              final query = textEditingValue.text.trim().toUpperCase();
                               return _listaVehiculosLocal.where((v) {
-                                final placa = (v['placa'] ?? '').toString().toUpperCase();
-                                return placa.contains(query);
+                                final placaNorm = ApiService.normalizarPlacaSV(
+                                  (v['placa'] ?? '').toString(),
+                                );
+                                return placaNorm.contains(raw) ||
+                                    placaNorm.replaceAll('-', '').contains(raw);
                               }).cast<Map<String, dynamic>>();
                             },
                             onSelected: (Map<String, dynamic> vehiculo) {
+                              final partes = ApiService.separarPlacaSV(
+                                (vehiculo['placa'] ?? '').toString(),
+                              );
                               setModalState(() {
+                                prefijoSeleccionado = partes['prefijo'] ?? 'P';
+                                cuerpoPlacaCtrl?.text = partes['cuerpo'] ?? '';
                                 vehiculoIdExistente = vehiculo['id'];
-                                marcaCtrl.text = (vehiculo['marca'] ?? '').toString();
-                                modeloCtrl.text = (vehiculo['modelo'] ?? '').toString();
-                                colorCtrl.text = (vehiculo['color'] ?? '').toString();
+                                marcaCtrl.text =
+                                    (vehiculo['marca'] ?? '').toString();
+                                modeloCtrl.text =
+                                    (vehiculo['modelo'] ?? '').toString();
+                                colorCtrl.text =
+                                    (vehiculo['color'] ?? '').toString();
 
-                                final catId = vehiculo['categoria_vehiculo_id'];
-                                if (catId != null && (catId == 1 || catId == 2 || catId == 3 || catId == 4 || catId == 5 || catId == 6)) {
+                                final int? catId = int.tryParse(
+                                  vehiculo['categoria_vehiculo_id']
+                                          ?.toString() ??
+                                      '',
+                                );
+                                if (catId != null && catId >= 1 && catId <= 6) {
                                   categoriaIdSeleccionada = catId;
                                 }
 
-                                // Buscar automáticamente al cliente dueño en la lista local de clientes
                                 final clienteId = vehiculo['cliente_id'];
                                 if (clienteId != null) {
-                                  final cliente = _listaClientesLocal.firstWhere(
+                                  final cliente =
+                                      _listaClientesLocal.firstWhere(
                                     (c) => c['id'] == clienteId,
                                     orElse: () => null,
                                   );
                                   if (cliente != null) {
                                     clienteIdExistente = cliente['id'];
-                                    clienteInputCtrl?.text = (cliente['nombre_completo'] ?? '').toString();
-                                    telefonoCtrl.text = (cliente['telefono'] ?? '').toString();
+                                    clienteInputCtrl?.text =
+                                        (cliente['nombre_completo'] ?? '')
+                                            .toString();
+                                    telefonoCtrl.text = _formatearTelefonoSV(
+                                      (cliente['telefono'] ?? '').toString(),
+                                    );
+                                    correoCtrl.text =
+                                        (cliente['correo'] ?? '').toString();
                                   }
                                 }
                               });
                             },
-                            fieldViewBuilder: (context, textEditingController, focusNode, onFieldSubmitted) {
-                              placaInputCtrl = textEditingController;
+                            fieldViewBuilder: (
+                              context,
+                              textEditingController,
+                              focusNode,
+                              onFieldSubmitted,
+                            ) {
+                              cuerpoPlacaCtrl = textEditingController;
                               return TextField(
                                 controller: textEditingController,
                                 focusNode: focusNode,
-                                textCapitalization: TextCapitalization.characters,
+                                textCapitalization:
+                                    TextCapitalization.characters,
+                                inputFormatters: [_CuerpoPlacaInputFormatter()],
                                 onChanged: (val) {
-                                  if (vehiculoIdExistente != null) {
-                                    setModalState(() => vehiculoIdExistente = null);
-                                  }
+                                  setModalState(() {
+                                    final limpio = val.trim().toUpperCase();
+                                    if (limpio.isNotEmpty) {
+                                      sincronizarVehiculoPorPlaca(
+                                        '$prefijoSeleccionado-$limpio',
+                                      );
+                                    } else {
+                                      vehiculoIdExistente = null;
+                                    }
+                                  });
                                 },
                                 decoration: InputDecoration(
-                                  labelText: 'Placa (ej. P123456) *',
-                                  hintText: 'Escribe para buscar...',
-                                  prefixIcon: const Icon(Icons.credit_card_rounded, size: 20),
+                                  labelText: 'Placa (ej. 123456) *',
+                                  hintText: '3 a 6 alfanum.',
                                   suffixIcon: vehiculoIdExistente != null
-                                      ? const Icon(Icons.check_circle_rounded, color: Color(0xFF16A34A), size: 18)
+                                      ? const Icon(
+                                          Icons.check_circle_rounded,
+                                          color: Color(0xFF16A34A),
+                                          size: 18,
+                                        )
                                       : null,
                                   border: const OutlineInputBorder(),
                                 ),
@@ -494,49 +1058,97 @@ class _HomeScreenState extends State<HomeScreen> {
                                   borderRadius: BorderRadius.circular(12),
                                   color: Colors.white,
                                   child: Container(
-                                    width: MediaQuery.of(context).size.width - 44,
-                                    constraints: const BoxConstraints(maxHeight: 180),
+                                    width:
+                                        MediaQuery.of(context).size.width - 140,
+                                    constraints:
+                                        const BoxConstraints(maxHeight: 180),
                                     decoration: BoxDecoration(
                                       color: Colors.white,
                                       borderRadius: BorderRadius.circular(12),
-                                      border: Border.all(color: const Color(0xFFE5E7EB)),
+                                      border: Border.all(
+                                          color: const Color(0xFFE5E7EB)),
                                     ),
                                     child: ListView.separated(
-                                      padding: const EdgeInsets.symmetric(vertical: 4),
+                                      padding: const EdgeInsets.symmetric(
+                                          vertical: 4),
                                       shrinkWrap: true,
                                       itemCount: options.length,
-                                      separatorBuilder: (_, __) => const Divider(height: 1, color: Color(0xFFF3F4F6)),
+                                      separatorBuilder: (_, __) =>
+                                          const Divider(
+                                              height: 1,
+                                              color: Color(0xFFF3F4F6)),
                                       itemBuilder: (context, index) {
                                         final opt = options.elementAt(index);
-                                        final String p = (opt['placa'] ?? '').toString();
-                                        final String m = (opt['marca'] ?? '').toString();
-                                        final String mod = (opt['modelo'] ?? '').toString();
+                                        final String p =
+                                            ApiService.normalizarPlacaSV(
+                                          (opt['placa'] ?? '').toString(),
+                                        );
+                                        final String m =
+                                            (opt['marca'] ?? '').toString();
+                                        final String mod =
+                                            (opt['modelo'] ?? '').toString();
+                                        final activo =
+                                            _buscarOrdenActivaPorPlaca(p) !=
+                                                null;
                                         return InkWell(
                                           onTap: () => onSelected(opt),
                                           child: Padding(
-                                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 12,
+                                              vertical: 10,
+                                            ),
                                             child: Row(
                                               children: [
                                                 Container(
-                                                  padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                                                  padding: const EdgeInsets
+                                                      .symmetric(
+                                                    horizontal: 7,
+                                                    vertical: 3,
+                                                  ),
                                                   decoration: BoxDecoration(
-                                                    color: const Color(0xFFF3F4F6),
-                                                    borderRadius: BorderRadius.circular(6),
-                                                    border: Border.all(color: const Color(0xFFD1D5DB)),
+                                                    color: activo
+                                                        ? const Color(
+                                                            0xFFFEE2E2)
+                                                        : const Color(
+                                                            0xFFF3F4F6),
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                            6),
+                                                    border: Border.all(
+                                                      color: activo
+                                                          ? const Color(
+                                                              0xFFF87171)
+                                                          : const Color(
+                                                              0xFFD1D5DB),
+                                                    ),
                                                   ),
                                                   child: Text(
                                                     p,
-                                                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                                                    style: TextStyle(
+                                                      fontWeight:
+                                                          FontWeight.bold,
+                                                      fontSize: 12,
+                                                      color: activo
+                                                          ? const Color(
+                                                              0xFFDC2626)
+                                                          : AppColors
+                                                              .textPrimary,
+                                                    ),
                                                   ),
                                                 ),
-                                                const SizedBox(width: 10),
+                                                const SizedBox(width: 8),
                                                 Expanded(
                                                   child: Text(
-                                                    '$m $mod'.trim(),
-                                                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                                                    activo
+                                                        ? '$m $mod (En lavado)'
+                                                        : '$m $mod'.trim(),
+                                                    style: const TextStyle(
+                                                      fontSize: 12.5,
+                                                      fontWeight:
+                                                          FontWeight.w600,
+                                                    ),
                                                   ),
                                                 ),
-                                                const Icon(Icons.arrow_forward_ios_rounded, size: 12, color: AppColors.textMuted),
                                               ],
                                             ),
                                           ),
@@ -549,13 +1161,14 @@ class _HomeScreenState extends State<HomeScreen> {
                             },
                           ),
                         ),
-                        const SizedBox(width: 10),
+                        const SizedBox(width: 8),
                         Expanded(
                           flex: 2,
                           child: TextField(
                             controller: colorCtrl,
                             decoration: const InputDecoration(
-                              labelText: 'Color (ej. Rojo)',
+                              labelText: 'Color',
+                              hintText: 'Gris',
                               border: OutlineInputBorder(),
                             ),
                           ),
@@ -590,67 +1203,116 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                     const SizedBox(height: 10),
 
-                    // Catálogo de Categorías Actualizado según tabla oficial
+                    // Selector de Categoría de Vehículo sincronizado con Tabla 5.1 del TDR
                     DropdownButtonFormField<int>(
+                      // ignore: deprecated_member_use
                       value: categoriaIdSeleccionada,
                       decoration: const InputDecoration(
-                        labelText: 'Categoría de Vehículo',
+                        labelText: 'Categoría de Vehículo (Tabla 5.1)',
                         border: OutlineInputBorder(),
                       ),
-                      items: const [
-                        DropdownMenuItem(
-                          value: 6,
-                          child: Text('Motocicleta (\$1.50)'),
-                        ),
-                        DropdownMenuItem(
-                          value: 1,
-                          child: Text('Sedán (\$4.00)'),
-                        ),
-                        DropdownMenuItem(
-                          value: 2,
-                          child: Text('Pick Up (\$8.00)'),
-                        ),
-                        DropdownMenuItem(
-                          value: 3,
-                          child: Text('Carros Medianos (\$6.00)'),
-                        ),
-                        DropdownMenuItem(
-                          value: 4,
-                          child: Text('Carros Grandes (\$8.00)'),
-                        ),
-                        DropdownMenuItem(
-                          value: 5,
-                          child: Text('Microbús (\$10.00)'),
-                        ),
-                      ],
+                      items: [1, 2, 3, 4, 5, 6].map((catId) {
+                        String nombreCat = ApiService.nombreCategoria(catId);
+                        for (final c in _categoriasApi) {
+                          if ((int.tryParse(c['id']?.toString() ?? '0') ?? 0) ==
+                              catId) {
+                            nombreCat = (c['nombre'] ?? nombreCat).toString();
+                            break;
+                          }
+                        }
+                        final double pBase = _apiService.obtenerPrecioMatriz(
+                          catId,
+                          servicioBaseIdSeleccionado,
+                        );
+                        return DropdownMenuItem<int>(
+                          value: catId,
+                          child: Text(
+                              '$nombreCat (\$${pBase.toStringAsFixed(2)})'),
+                        );
+                      }).toList(),
                       onChanged: (val) {
-                        if (val != null) setModalState(() => categoriaIdSeleccionada = val);
+                        if (val != null) {
+                          setModalState(() => categoriaIdSeleccionada = val);
+                        }
                       },
                     ),
                     const SizedBox(height: 10),
 
-                    // Autocompletado de Cliente (Widget nativo Autocomplete)
+                    // Selector de Servicio Base (Tabla 5.1 del TDR: Lavado Básico, Pasteado a Mano, Pasteado a Máquina)
+                    DropdownButtonFormField<int>(
+                      // ignore: deprecated_member_use
+                      value: servicioBaseIdSeleccionado,
+                      decoration: const InputDecoration(
+                        labelText: 'Servicio Base (Tabla 5.1)',
+                        prefixIcon:
+                            Icon(Icons.local_car_wash_rounded, size: 20),
+                        border: OutlineInputBorder(),
+                      ),
+                      items: serviciosBaseOpciones.map((sb) {
+                        final int sbId =
+                            int.tryParse(sb['id']?.toString() ?? '1') ?? 1;
+                        final String sbNombre =
+                            (sb['nombre'] ?? 'Lavado Básico').toString();
+                        final double precioSb = _apiService.obtenerPrecioMatriz(
+                          categoriaIdSeleccionada,
+                          sbId,
+                        );
+                        return DropdownMenuItem<int>(
+                          value: sbId,
+                          child: Text(
+                              '$sbNombre (\$${precioSb.toStringAsFixed(2)})'),
+                        );
+                      }).toList(),
+                      onChanged: (val) {
+                        if (val != null) {
+                          setModalState(() => servicioBaseIdSeleccionado = val);
+                        }
+                      },
+                    ),
+                    const SizedBox(height: 10),
+
+                    // Autocompletado de Cliente
                     Autocomplete<Map<String, dynamic>>(
-                      displayStringForOption: (option) => (option['nombre_completo'] ?? '').toString(),
+                      displayStringForOption: (option) =>
+                          (option['nombre_completo'] ?? '').toString(),
                       optionsBuilder: (TextEditingValue textEditingValue) {
                         if (textEditingValue.text.trim().isEmpty) {
                           return const Iterable<Map<String, dynamic>>.empty();
                         }
-                        final query = textEditingValue.text.trim().toLowerCase();
+                        final query =
+                            textEditingValue.text.trim().toLowerCase();
                         return _listaClientesLocal.where((c) {
-                          final nombre = (c['nombre_completo'] ?? '').toString().toLowerCase();
+                          final nombre = (c['nombre_completo'] ?? '')
+                              .toString()
+                              .toLowerCase();
                           return nombre.contains(query);
                         }).cast<Map<String, dynamic>>();
                       },
                       onSelected: (Map<String, dynamic> cliente) {
                         setModalState(() {
                           clienteIdExistente = cliente['id'];
-                          if (cliente['telefono'] != null && cliente['telefono'].toString().trim().isNotEmpty) {
-                            telefonoCtrl.text = cliente['telefono'].toString();
+                          if (cliente['telefono'] != null &&
+                              cliente['telefono']
+                                  .toString()
+                                  .trim()
+                                  .isNotEmpty) {
+                            telefonoCtrl.text = _formatearTelefonoSV(
+                              cliente['telefono'].toString(),
+                            );
+                          }
+                          if (cliente['correo'] != null &&
+                              cliente['correo'].toString().trim().isNotEmpty) {
+                            correoCtrl.text =
+                                cliente['correo'].toString().trim();
                           }
                         });
                       },
-                      fieldViewBuilder: (context, textEditingController, focusNode, onFieldSubmitted) {
+                      fieldViewBuilder: (
+                        context,
+                        textEditingController,
+                        focusNode,
+                        onFieldSubmitted,
+                      ) {
                         clienteInputCtrl = textEditingController;
                         return TextField(
                           controller: textEditingController,
@@ -663,9 +1325,14 @@ class _HomeScreenState extends State<HomeScreen> {
                           decoration: InputDecoration(
                             labelText: 'Nombre del Cliente *',
                             hintText: 'Buscar o escribir cliente...',
-                            prefixIcon: const Icon(Icons.person_outline_rounded, size: 20),
+                            prefixIcon: const Icon(Icons.person_outline_rounded,
+                                size: 20),
                             suffixIcon: clienteIdExistente != null
-                                ? const Icon(Icons.check_circle_rounded, color: Color(0xFF16A34A), size: 18)
+                                ? const Icon(
+                                    Icons.check_circle_rounded,
+                                    color: Color(0xFF16A34A),
+                                    size: 18,
+                                  )
                                 : null,
                             border: const OutlineInputBorder(),
                           ),
@@ -684,46 +1351,77 @@ class _HomeScreenState extends State<HomeScreen> {
                               decoration: BoxDecoration(
                                 color: Colors.white,
                                 borderRadius: BorderRadius.circular(12),
-                                border: Border.all(color: const Color(0xFFE5E7EB)),
+                                border:
+                                    Border.all(color: const Color(0xFFE5E7EB)),
                               ),
                               child: ListView.separated(
-                                padding: const EdgeInsets.symmetric(vertical: 4),
+                                padding:
+                                    const EdgeInsets.symmetric(vertical: 4),
                                 shrinkWrap: true,
                                 itemCount: options.length,
-                                separatorBuilder: (_, __) => const Divider(height: 1, color: Color(0xFFF3F4F6)),
+                                separatorBuilder: (_, __) => const Divider(
+                                    height: 1, color: Color(0xFFF3F4F6)),
                                 itemBuilder: (context, index) {
                                   final opt = options.elementAt(index);
-                                  final String nombre = (opt['nombre_completo'] ?? '').toString();
-                                  final String tel = (opt['telefono'] ?? '').toString();
+                                  final String nombre =
+                                      (opt['nombre_completo'] ?? '').toString();
+                                  final String tel =
+                                      (opt['telefono'] ?? '').toString();
+                                  final String cor =
+                                      (opt['correo'] ?? '').toString();
                                   return InkWell(
                                     onTap: () => onSelected(opt),
                                     child: Padding(
-                                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 14,
+                                        vertical: 10,
+                                      ),
                                       child: Row(
                                         children: [
                                           const CircleAvatar(
                                             radius: 12,
                                             backgroundColor: Color(0xFFEFF6FF),
-                                            child: Icon(Icons.person, size: 14, color: AppColors.kRoyalBlue),
+                                            child: Icon(
+                                              Icons.person,
+                                              size: 14,
+                                              color: AppColors.kRoyalBlue,
+                                            ),
                                           ),
                                           const SizedBox(width: 10),
                                           Expanded(
                                             child: Column(
-                                              crossAxisAlignment: CrossAxisAlignment.start,
+                                              crossAxisAlignment:
+                                                  CrossAxisAlignment.start,
                                               children: [
                                                 Text(
                                                   nombre,
-                                                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                                                  style: const TextStyle(
+                                                    fontSize: 13,
+                                                    fontWeight: FontWeight.w600,
+                                                  ),
                                                 ),
-                                                if (tel.isNotEmpty)
+                                                if (tel.isNotEmpty ||
+                                                    cor.isNotEmpty)
                                                   Text(
-                                                    'Tel: $tel',
-                                                    style: const TextStyle(fontSize: 11, color: AppColors.textMuted),
+                                                    [
+                                                      if (tel.isNotEmpty)
+                                                        'Tel: $tel',
+                                                      if (cor.isNotEmpty) cor,
+                                                    ].join(' • '),
+                                                    style: const TextStyle(
+                                                      fontSize: 11,
+                                                      color:
+                                                          AppColors.textMuted,
+                                                    ),
                                                   ),
                                               ],
                                             ),
                                           ),
-                                          const Icon(Icons.arrow_forward_ios_rounded, size: 12, color: AppColors.textMuted),
+                                          const Icon(
+                                            Icons.arrow_forward_ios_rounded,
+                                            size: 12,
+                                            color: AppColors.textMuted,
+                                          ),
                                         ],
                                       ),
                                     ),
@@ -737,16 +1435,38 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                     const SizedBox(height: 10),
 
-                    // Teléfono del Cliente (Campo Nuevo Obligatorio)
-                    TextField(
-                      controller: telefonoCtrl,
-                      keyboardType: TextInputType.phone,
-                      decoration: const InputDecoration(
-                        labelText: 'Teléfono del Cliente * (Obligatorio)',
-                        prefixIcon: Icon(Icons.phone_outlined, size: 20),
-                        hintText: 'Ej. 7000-0000 o 5551234567',
-                        border: OutlineInputBorder(),
-                      ),
+                    // Teléfono con máscara 0000-0000 y Correo Electrónico (TDR 4.3 y 4.4)
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: telefonoCtrl,
+                            keyboardType: TextInputType.number,
+                            maxLength: 9,
+                            inputFormatters: [_TelefonoSVInputFormatter()],
+                            decoration: const InputDecoration(
+                              counterText: '',
+                              labelText: 'Teléfono * (0000-0000)',
+                              prefixIcon: Icon(Icons.phone_outlined, size: 19),
+                              hintText: '7777-8888',
+                              border: OutlineInputBorder(),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: TextField(
+                            controller: correoCtrl,
+                            keyboardType: TextInputType.emailAddress,
+                            decoration: const InputDecoration(
+                              labelText: 'Correo (Pre-factura)',
+                              prefixIcon: Icon(Icons.email_outlined, size: 19),
+                              hintText: 'cliente@correo.com',
+                              border: OutlineInputBorder(),
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                     const SizedBox(height: 14),
 
@@ -770,10 +1490,14 @@ class _HomeScreenState extends State<HomeScreen> {
                         children: extras.map((extra) {
                           return CheckboxListTile(
                             dense: true,
-                            contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 0),
+                            contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 10, vertical: 0),
                             title: Text(
                               extra.nombre,
-                              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                              style: const TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                              ),
                             ),
                             subtitle: Text(
                               '+\$${extra.precio.toStringAsFixed(2)}',
@@ -796,9 +1520,10 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                     const SizedBox(height: 12),
 
-                    // Resumen de Precio Estimado (Base + Extras + IVA 13%)
+                    // Resumen de Precio Estimado (Base Matriz + Extras + IVA 13%)
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 10),
                       decoration: BoxDecoration(
                         color: const Color(0xFFEFF6FF),
                         borderRadius: BorderRadius.circular(12),
@@ -812,11 +1537,17 @@ class _HomeScreenState extends State<HomeScreen> {
                             children: [
                               Text(
                                 'Base: \$${precioBaseEst.toStringAsFixed(2)} + Extras: \$${totalExtrasEst.toStringAsFixed(2)}',
-                                style: const TextStyle(fontSize: 11, color: AppColors.textSecondary),
+                                style: const TextStyle(
+                                  fontSize: 11,
+                                  color: AppColors.textSecondary,
+                                ),
                               ),
                               Text(
                                 'Subtotal: \$${subtotalEst.toStringAsFixed(2)} (IVA: 13%)',
-                                style: const TextStyle(fontSize: 11, color: AppColors.textMuted),
+                                style: const TextStyle(
+                                  fontSize: 11,
+                                  color: AppColors.textMuted,
+                                ),
                               ),
                             ],
                           ),
@@ -833,95 +1564,210 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                     const SizedBox(height: 16),
 
-                    // Botón de Envío
+                    // Botón de Envío (bloqueado si el vehículo ya tiene orden activa en patio)
                     ElevatedButton.icon(
-                      onPressed: () async {
-                        final String placa = (placaInputCtrl?.text ?? '').trim().toUpperCase();
-                        final String nombreCli = (clienteInputCtrl?.text ?? '').trim();
-                        final String telefonoCli = telefonoCtrl.text.trim();
+                      onPressed: ordenActivaPatio != null
+                          ? null
+                          : () async {
+                              final String cuerpo =
+                                  (cuerpoPlacaCtrl?.text ?? '')
+                                      .trim()
+                                      .toUpperCase()
+                                      .replaceAll(RegExp(r'[^A-Z0-9]'), '');
+                              final String nombreCli =
+                                  (clienteInputCtrl?.text ?? '').trim();
+                              final String telefonoCli =
+                                  telefonoCtrl.text.trim();
+                              final String correoCli =
+                                  correoCtrl.text.trim().toLowerCase();
 
-                        // Validaciones estrictas
-                        if (placa.isEmpty) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('⚠️ La placa del vehículo es obligatoria.'),
-                              backgroundColor: Colors.redAccent,
-                              behavior: SnackBarBehavior.floating,
-                            ),
-                          );
-                          return;
-                        }
+                              // 1. Validar Placa Salvadoreña Estricta
+                              if (!RegExp(r'^[A-Z0-9]{3,6}$')
+                                  .hasMatch(cuerpo)) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text(
+                                      '⚠️ Ingresa de 3 a 6 caracteres alfanuméricos para la placa (Ej. P-123456).',
+                                    ),
+                                    backgroundColor: Colors.redAccent,
+                                    behavior: SnackBarBehavior.floating,
+                                  ),
+                                );
+                                return;
+                              }
 
-                        if (nombreCli.isEmpty) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('⚠️ El nombre del cliente es obligatorio.'),
-                              backgroundColor: Colors.redAccent,
-                              behavior: SnackBarBehavior.floating,
-                            ),
-                          );
-                          return;
-                        }
+                              final String placaCompleta =
+                                  '$prefijoSeleccionado-$cuerpo';
+                              final VehiculoPatio? yaEnLavado =
+                                  _buscarOrdenActivaPorPlaca(placaCompleta);
+                              if (yaEnLavado != null) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Text(
+                                      '⚠️ Este vehículo ya está en lavado en ${yaEnLavado.bahia}.',
+                                    ),
+                                    backgroundColor: Colors.redAccent,
+                                    behavior: SnackBarBehavior.floating,
+                                  ),
+                                );
+                                return;
+                              }
 
-                        if (telefonoCli.isEmpty) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('⚠️ El teléfono del cliente es obligatorio.'),
-                              backgroundColor: Colors.redAccent,
-                              behavior: SnackBarBehavior.floating,
-                            ),
-                          );
-                          return;
-                        }
+                              // 2. Validar Nombre del Cliente
+                              if (nombreCli.isEmpty) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text(
+                                        '⚠️ El nombre del cliente es obligatorio.'),
+                                    backgroundColor: Colors.redAccent,
+                                    behavior: SnackBarBehavior.floating,
+                                  ),
+                                );
+                                return;
+                              }
 
-                        final marca = marcaCtrl.text.trim().isEmpty ? 'Toyota' : marcaCtrl.text.trim();
-                        final modelo = modeloCtrl.text.trim().isEmpty ? 'Corolla' : modeloCtrl.text.trim();
-                        final color = colorCtrl.text.trim().isEmpty ? 'Gris' : colorCtrl.text.trim();
+                              // 3. Validar Teléfono 0000-0000 y duplicados
+                              if (!RegExp(r'^\d{4}-\d{4}$')
+                                  .hasMatch(telefonoCli)) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text(
+                                      '⚠️ El teléfono debe tener 8 dígitos en formato 0000-0000.',
+                                    ),
+                                    backgroundColor: Colors.redAccent,
+                                    behavior: SnackBarBehavior.floating,
+                                  ),
+                                );
+                                return;
+                              }
 
-                        final List<double> extrasPrecios = extras
-                            .where((e) => e.seleccionado)
-                            .map((e) => e.precio)
-                            .toList();
-                        final List<int> extrasIds = extras
-                            .where((e) => e.seleccionado)
-                            .map((e) => e.id)
-                            .toList();
+                              for (final c in _listaClientesLocal) {
+                                final int cid =
+                                    int.tryParse(c['id']?.toString() ?? '0') ??
+                                        0;
+                                final String telC = _formatearTelefonoSV(
+                                  (c['telefono'] ?? '').toString(),
+                                );
+                                if (telC == telefonoCli &&
+                                    cid != (clienteIdExistente ?? -1)) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content: Text(
+                                        '⚠️ El teléfono $telefonoCli ya pertenece a otro cliente (${c['nombre_completo']}).',
+                                      ),
+                                      backgroundColor: Colors.redAccent,
+                                      behavior: SnackBarBehavior.floating,
+                                    ),
+                                  );
+                                  return;
+                                }
+                              }
 
-                        final result = await _apiService.recibirVehiculo(
-                          clienteIdExistente: clienteIdExistente,
-                          vehiculoIdExistente: vehiculoIdExistente,
-                          placa: placa,
-                          marca: marca,
-                          modelo: modelo,
-                          color: color,
-                          nombreCliente: nombreCli,
-                          telefonoCliente: telefonoCli,
-                          categoriaId: categoriaIdSeleccionada,
-                          bahiaId: bahiaLibre,
-                          extras: extrasPrecios,
-                          extrasIds: extrasIds,
-                        );
+                              // 4. Validar Correo Electrónico (si se ingresó) y duplicados
+                              if (correoCli.isNotEmpty) {
+                                if (!RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
+                                    .hasMatch(correoCli)) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                      content: Text(
+                                        '⚠️ El formato del correo electrónico no es válido.',
+                                      ),
+                                      backgroundColor: Colors.redAccent,
+                                      behavior: SnackBarBehavior.floating,
+                                    ),
+                                  );
+                                  return;
+                                }
 
-                        if (result['success'] != true && mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(
-                              content: Text('Error: ${result['error']}'),
-                              backgroundColor: Colors.redAccent,
-                            ),
-                          );
-                        }
+                                for (final c in _listaClientesLocal) {
+                                  final int cid = int.tryParse(
+                                          c['id']?.toString() ?? '0') ??
+                                      0;
+                                  final String corC = (c['correo'] ?? '')
+                                      .toString()
+                                      .trim()
+                                      .toLowerCase();
+                                  if (corC.isNotEmpty &&
+                                      corC == correoCli &&
+                                      cid != (clienteIdExistente ?? -1)) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(
+                                        content: Text(
+                                          '⚠️ El correo $correoCli ya está registrado con otro cliente (${c['nombre_completo']}).',
+                                        ),
+                                        backgroundColor: Colors.redAccent,
+                                        behavior: SnackBarBehavior.floating,
+                                      ),
+                                    );
+                                    return;
+                                  }
+                                }
+                              }
 
-                        if (context.mounted) Navigator.pop(context);
-                        await _obtenerDatosDeApi(mostrarMensaje: true);
-                      },
+                              final marca = marcaCtrl.text.trim().isEmpty
+                                  ? 'Toyota'
+                                  : marcaCtrl.text.trim();
+                              final modelo = modeloCtrl.text.trim().isEmpty
+                                  ? 'Corolla'
+                                  : modeloCtrl.text.trim();
+                              final color = colorCtrl.text.trim().isEmpty
+                                  ? 'Gris'
+                                  : colorCtrl.text.trim();
+
+                              final List<double> extrasPrecios = extras
+                                  .where((e) => e.seleccionado)
+                                  .map((e) => e.precio)
+                                  .toList();
+                              final List<int> extrasIds = extras
+                                  .where((e) => e.seleccionado)
+                                  .map((e) => e.id)
+                                  .toList();
+
+                              final result = await _apiService.recibirVehiculo(
+                                clienteIdExistente: clienteIdExistente,
+                                vehiculoIdExistente: vehiculoIdExistente,
+                                placa: placaCompleta,
+                                marca: marca,
+                                modelo: modelo,
+                                color: color,
+                                nombreCliente: nombreCli,
+                                telefonoCliente: telefonoCli,
+                                correoCliente:
+                                    correoCli.isNotEmpty ? correoCli : null,
+                                categoriaId: categoriaIdSeleccionada,
+                                servicioBaseId: servicioBaseIdSeleccionado,
+                                bahiaId: bahiaLibre,
+                                extras: extrasPrecios,
+                                extrasIds: extrasIds,
+                              );
+
+                              if (result['success'] != true) {
+                                if (context.mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content:
+                                          Text('Error: ${result['error']}'),
+                                      backgroundColor: Colors.redAccent,
+                                    ),
+                                  );
+                                }
+                                return;
+                              }
+
+                              if (context.mounted) Navigator.pop(context);
+                              await _obtenerDatosDeApi(mostrarMensaje: true);
+                            },
                       style: ElevatedButton.styleFrom(
                         backgroundColor: AppColors.kRoyalBlue,
+                        disabledBackgroundColor: Colors.grey.shade300,
                         foregroundColor: Colors.white,
                         padding: const EdgeInsets.symmetric(vertical: 14),
                       ),
                       icon: const Icon(Icons.add_task_rounded),
                       label: Text(
-                        'Registrar en Bahía $bahiaLibre (Pendiente)',
+                        ordenActivaPatio != null
+                            ? 'Vehículo ya activo en ${ordenActivaPatio.bahia}'
+                            : 'Registrar en Bahía $bahiaLibre (Pendiente)',
                         style: const TextStyle(fontWeight: FontWeight.bold),
                       ),
                     ),
@@ -939,14 +1785,14 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.white,
-      // El botón flotante de recepción solo se muestra en la pestaña de Patio
       floatingActionButton: _selectedIndex == 0
           ? FloatingActionButton.extended(
               onPressed: _abrirModalRecepcion,
               backgroundColor: AppColors.kRoyalBlue,
               foregroundColor: Colors.white,
               icon: const Icon(Icons.add_rounded),
-              label: const Text('Recibir', style: TextStyle(fontWeight: FontWeight.bold)),
+              label: const Text('Recibir',
+                  style: TextStyle(fontWeight: FontWeight.bold)),
             )
           : null,
       body: SafeArea(
@@ -967,7 +1813,10 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
         child: BottomNavigationBar(
           currentIndex: _selectedIndex,
-          onTap: (index) => setState(() => _selectedIndex = index),
+          onTap: (index) {
+            setState(() => _selectedIndex = index);
+            _apiService.verificarUsuarioActivo(context);
+          },
           backgroundColor: Colors.white,
           selectedItemColor: AppColors.kRoyalBlue,
           unselectedItemColor: AppColors.textHint,
@@ -977,19 +1826,31 @@ class _HomeScreenState extends State<HomeScreen> {
           elevation: 0,
           items: [
             BottomNavigationBarItem(
-              icon: _IconoBarraInferior(icono: Icons.home_outlined, activo: _selectedIndex == 0),
+              icon: _IconoBarraInferior(
+                icono: Icons.home_outlined,
+                activo: _selectedIndex == 0,
+              ),
               label: 'Patio',
             ),
             BottomNavigationBarItem(
-              icon: _IconoBarraInferior(icono: Icons.payments_outlined, activo: _selectedIndex == 1),
-              label: 'Cobros',
+              icon: _IconoBarraInferior(
+                icono: Icons.badge_outlined,
+                activo: _selectedIndex == 1,
+              ),
+              label: 'Planilla',
             ),
             BottomNavigationBarItem(
-              icon: _IconoBarraInferior(icono: Icons.inventory_2_outlined, activo: _selectedIndex == 2),
+              icon: _IconoBarraInferior(
+                icono: Icons.inventory_2_outlined,
+                activo: _selectedIndex == 2,
+              ),
               label: 'Inventario',
             ),
             BottomNavigationBarItem(
-              icon: _IconoBarraInferior(icono: Icons.person_outline_rounded, activo: _selectedIndex == 3),
+              icon: _IconoBarraInferior(
+                icono: Icons.person_outline_rounded,
+                activo: _selectedIndex == 3,
+              ),
               label: 'Perfil',
             ),
           ],
@@ -1001,9 +1862,15 @@ class _HomeScreenState extends State<HomeScreen> {
   // ─── PESTAÑA 0: PATIO ─────────────────────────────────────
 
   Widget _buildPantallaInicio() {
-    final totalBahias = AppConstants.totalBahias;
-    final ocupadas = List.generate(totalBahias, (i) => _bahiaOcupada(i + 1)).where((b) => b).length;
-    final libres = totalBahias - ocupadas;
+    const totalBahias = AppConstants.totalBahias;
+    final ocupadas = List.generate(totalBahias, (i) => _bahiaOcupada(i + 1))
+        .where((b) => b)
+        .length;
+    final enMantenimiento = List.generate(
+      totalBahias,
+      (i) => !_bahiaOcupada(i + 1) && _bahiaEnMantenimiento(i + 1),
+    ).where((b) => b).length;
+    final libres = totalBahias - ocupadas - enMantenimiento;
 
     final vehiculosFiltrados = _vehiculos.where((v) {
       if (_busqueda.isEmpty) return true;
@@ -1024,12 +1891,28 @@ class _HomeScreenState extends State<HomeScreen> {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                const Text('Operaciones de Patio', style: TextStyle(fontSize: 18, color: AppColors.textPrimary, fontWeight: FontWeight.w800)),
+                const Text(
+                  'Operaciones de Patio',
+                  style: TextStyle(
+                    fontSize: 18,
+                    color: AppColors.textPrimary,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
                 IconButton(
                   onPressed: () => _obtenerDatosDeApi(mostrarMensaje: true),
                   icon: _cargandoApi
-                      ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
-                      : Icon(Icons.sync_rounded, color: _conectadoConApi ? AppColors.success : AppColors.textMuted),
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : Icon(
+                          Icons.sync_rounded,
+                          color: _conectadoConApi
+                              ? AppColors.success
+                              : AppColors.textMuted,
+                        ),
                   tooltip: 'Sincronizar con API',
                 ),
               ],
@@ -1039,12 +1922,17 @@ class _HomeScreenState extends State<HomeScreen> {
               onChanged: (valor) => setState(() => _busqueda = valor),
               decoration: InputDecoration(
                 hintText: 'Buscar vehículo por placa o cliente...',
-                hintStyle: const TextStyle(color: AppColors.textHint, fontSize: 14),
-                prefixIcon: const Icon(Icons.search_rounded, color: AppColors.textMuted),
+                hintStyle:
+                    const TextStyle(color: AppColors.textHint, fontSize: 14),
+                prefixIcon: const Icon(Icons.search_rounded,
+                    color: AppColors.textMuted),
                 filled: true,
                 fillColor: AppColors.surfaceGrey,
                 contentPadding: const EdgeInsets.symmetric(vertical: 14),
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide.none),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(16),
+                  borderSide: BorderSide.none,
+                ),
               ),
             ),
             const SizedBox(height: 18),
@@ -1060,7 +1948,13 @@ class _HomeScreenState extends State<HomeScreen> {
                   end: Alignment.bottomRight,
                 ),
                 borderRadius: BorderRadius.circular(24),
-                boxShadow: [BoxShadow(color: AppColors.kRoyalBlue.withAlpha(55), blurRadius: 16, offset: const Offset(0, 8))],
+                boxShadow: [
+                  BoxShadow(
+                    color: AppColors.kRoyalBlue.withAlpha(55),
+                    blurRadius: 16,
+                    offset: const Offset(0, 8),
+                  ),
+                ],
               ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -1068,34 +1962,74 @@ class _HomeScreenState extends State<HomeScreen> {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      const Text('Estado de bahías', style: TextStyle(color: Colors.white70, fontSize: 13.5, fontWeight: FontWeight.w500)),
+                      const Text(
+                        'Estado de bahías (Turno Hoy)',
+                        style: TextStyle(
+                          color: Colors.white70,
+                          fontSize: 13.5,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 6),
                         decoration: BoxDecoration(
                           color: const Color(0xFF228B22),
                           borderRadius: BorderRadius.circular(12),
                           border: Border.all(color: Colors.white24),
                         ),
-                        child: Text('$libres libres', style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold)),
+                        child: Text(
+                          '$libres libres',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
                       ),
                     ],
                   ),
                   const SizedBox(height: 2),
-                  Text('$ocupadas ocupadas', style: const TextStyle(color: Colors.white, fontSize: 26, fontWeight: FontWeight.w800)),
+                  Text(
+                    enMantenimiento > 0
+                        ? '$ocupadas ocupadas • $enMantenimiento mant.'
+                        : '$ocupadas ocupadas',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 24,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
                   const SizedBox(height: 18),
                   Row(
                     children: List.generate(totalBahias, (i) {
-                      final ocupada = _bahiaOcupada(i + 1);
+                      final int numBahia = i + 1;
+                      final bool ocupada = _bahiaOcupada(numBahia);
+                      final bool mant =
+                          !ocupada && _bahiaEnMantenimiento(numBahia);
+                      final Color colorCaja = ocupada
+                          ? AppColors.bahiaOcupada
+                          : mant
+                              ? const Color(0xFFD97706)
+                              : AppColors.bahiaLibre;
                       return Expanded(
                         child: Container(
-                          margin: EdgeInsets.only(right: i < totalBahias - 1 ? 6 : 0),
+                          margin: EdgeInsets.only(
+                              right: i < totalBahias - 1 ? 6 : 0),
                           height: 46,
                           decoration: BoxDecoration(
-                            color: ocupada ? AppColors.bahiaOcupada : AppColors.bahiaLibre,
+                            color: colorCaja,
                             borderRadius: BorderRadius.circular(12),
                           ),
                           alignment: Alignment.center,
-                          child: Text('B${i + 1}', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 14)),
+                          child: Text(
+                            mant ? 'B$numBahia•M' : 'B$numBahia',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 13,
+                            ),
+                          ),
                         ),
                       );
                     }),
@@ -1109,15 +2043,41 @@ class _HomeScreenState extends State<HomeScreen> {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                const Text('Vehículos en Patio', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+                Text(
+                  'Vehículos en Patio (${vehiculosFiltrados.length})',
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w700,
+                    color: AppColors.textPrimary,
+                  ),
+                ),
                 GestureDetector(
                   onTap: () => setState(() => _selectedIndex = 1),
-                  child: const Text('Ver Cobros e Historial', style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w700, color: AppColors.kRoyalBlue)),
+                  child: const Text(
+                    'Ver Planilla y Turno',
+                    style: TextStyle(
+                      fontSize: 13.5,
+                      fontWeight: FontWeight.w700,
+                      color: AppColors.kRoyalBlue,
+                    ),
+                  ),
                 ),
               ],
             ),
             const SizedBox(height: 12),
-            ...vehiculosFiltrados.map((v) => _buildVehiculoCard(v)),
+            if (vehiculosFiltrados.isEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 32),
+                child: Center(
+                  child: Text(
+                    'No hay vehículos registrados en el turno actual.',
+                    style:
+                        TextStyle(color: Colors.grey.shade500, fontSize: 13.5),
+                  ),
+                ),
+              )
+            else
+              ...vehiculosFiltrados.map((v) => _buildVehiculoCard(v)),
           ],
         ),
       ),
@@ -1134,7 +2094,13 @@ class _HomeScreenState extends State<HomeScreen> {
         color: Colors.white,
         borderRadius: BorderRadius.circular(18),
         border: Border.all(color: color, width: 1.6),
-        boxShadow: [BoxShadow(color: color.withAlpha(70), blurRadius: 10, offset: const Offset(0, 4))],
+        boxShadow: [
+          BoxShadow(
+            color: color.withAlpha(70),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          ),
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1142,58 +2108,115 @@ class _HomeScreenState extends State<HomeScreen> {
           Row(
             children: [
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                 decoration: BoxDecoration(
                   color: AppColors.surfaceLight,
                   borderRadius: BorderRadius.circular(10),
                   border: Border.all(color: AppColors.borderLight),
                 ),
-                child: Text(v.placa, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w900, color: AppColors.textPrimary)),
+                child: Text(
+                  v.placa,
+                  style: const TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w900,
+                    color: AppColors.textPrimary,
+                  ),
+                ),
               ),
               const SizedBox(width: 12),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('${v.nombreCompletoCarro} • ${v.categoria}', style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+                    Text(
+                      '${v.nombreCompletoCarro} • ${v.categoria}',
+                      style: const TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                        color: AppColors.textPrimary,
+                      ),
+                    ),
                     const SizedBox(height: 2),
                     Text(
-                      '${v.bahia} • ${v.totalPagar} ${v.pagado ? "(PAGADO)" : ""}',
+                      '${v.bahia} • ${v.pagado ? "COBRADO EN CAJA" : "PENDIENTE EN CAJA"}',
                       style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: v.pagado ? FontWeight.bold : FontWeight.normal,
-                        color: v.pagado ? AppColors.success : AppColors.textMuted,
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w700,
+                        color: v.pagado ? AppColors.success : AppColors.warning,
                       ),
                     ),
                   ],
                 ),
               ),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                decoration: BoxDecoration(color: fondo, borderRadius: BorderRadius.circular(10)),
-                child: Text(AppConstants.nombresFase[v.fase], style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w800, color: color)),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                decoration: BoxDecoration(
+                  color: fondo,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Text(
+                  AppConstants.nombresFase[v.fase],
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w800,
+                    color: color,
+                  ),
+                ),
               ),
             ],
           ),
           const SizedBox(height: 8),
-          Text('Cliente: ${v.cliente} (${v.telefonoCliente})', style: const TextStyle(fontSize: 12, color: AppColors.textSecondary, fontWeight: FontWeight.w500)),
+          Text(
+            'Cliente: ${v.cliente} (${v.telefonoCliente})',
+            style: const TextStyle(
+              fontSize: 12,
+              color: AppColors.textSecondary,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
           const SizedBox(height: 12),
+          // Botones con Flujo Unidireccional Estricto (0 -> 1 -> 2)
           Row(
             children: List.generate(3, (i) {
-              final activo = v.fase == i;
+              final bool activo = v.fase == i;
+              // Regla unidireccional:
+              // - Si fase == 0 (Pendiente): puede pasar a 1 (En proceso) o 2 (Terminado).
+              // - Si fase == 1 (En proceso): botón 0 (Pendiente) deshabilitado (onPressed: null), solo puede avanzar a 2.
+              // - Si fase == 2 (Terminado): botones 0 y 1 deshabilitados (onPressed: null).
+              final bool deshabilitadoPorRetroceso = i < v.fase || v.fase == 2;
+              final VoidCallback? accionBoton = deshabilitadoPorRetroceso
+                  ? null
+                  : (activo ? null : () => _confirmarCambioEstado(v, i));
+
               return Expanded(
                 child: Padding(
                   padding: EdgeInsets.only(right: i < 2 ? 6 : 0),
                   child: ElevatedButton(
-                    onPressed: () => _cambiarEstado(v, i),
+                    onPressed: accionBoton,
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: activo ? AppColors.coloresFase[i] : AppColors.fondosFase[i],
-                      foregroundColor: activo ? Colors.white : AppColors.coloresFase[i],
+                      backgroundColor: activo
+                          ? AppColors.coloresFase[i]
+                          : AppColors.fondosFase[i],
+                      foregroundColor:
+                          activo ? Colors.white : AppColors.coloresFase[i],
+                      disabledBackgroundColor: activo
+                          ? AppColors.coloresFase[i]
+                          : AppColors.surfaceGrey,
+                      disabledForegroundColor:
+                          activo ? Colors.white : AppColors.textHint,
                       padding: const EdgeInsets.symmetric(vertical: 12),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
                       elevation: activo ? 2 : 0,
                     ),
-                    child: Text(AppConstants.nombresFase[i], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                    child: Text(
+                      AppConstants.nombresFase[i],
+                      style: const TextStyle(
+                          fontWeight: FontWeight.bold, fontSize: 12),
+                    ),
                   ),
                 ),
               );
@@ -1204,7 +2227,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // ─── PESTAÑA 1: COBROS E HISTORIAL ────────────────────────
+  // ─── PESTAÑA 1: PLANILLA Y TURNO OPERATIVO ────────────────
 
   Widget _buildPantallaControlPatio() {
     final tabs = ['Todos', ...AppConstants.nombresFase];
@@ -1213,112 +2236,201 @@ class _HomeScreenState extends State<HomeScreen> {
       return AppConstants.nombresFase[v.fase] == _filtroControl;
     }).toList();
 
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(22, 16, 22, 88),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              _BotonIconoBorde(icono: Icons.chevron_left_rounded, onTap: () => setState(() => _selectedIndex = 0)),
-              const Text('Cobros e Historial', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
-              _BotonIconoBorde(icono: Icons.sync_rounded, onTap: () => _obtenerDatosDeApi(mostrarMensaje: true)),
-            ],
-          ),
-          const SizedBox(height: 18),
-
-          // Cards de resumen
-          Row(
-            children: [
-              Expanded(
-                child: Container(
-                  padding: const EdgeInsets.all(14),
-                  decoration: BoxDecoration(color: AppColors.fondosFase[2], borderRadius: BorderRadius.circular(16)),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text('MI COMISIÓN (PLANILLA)', style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w800, color: AppColors.successDark)),
-                      const SizedBox(height: 4),
-                      Text('\$${_totalComisionesOperarios.toStringAsFixed(2)}', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: AppColors.successDark)),
-                      Text('$_cantidadLavadosComision servicios asignados', style: const TextStyle(fontSize: 11, color: AppColors.successText)),
-                    ],
+    return RefreshIndicator(
+      onRefresh: () => _obtenerDatosDeApi(mostrarMensaje: true),
+      child: SingleChildScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(22, 16, 22, 88),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                _BotonIconoBorde(
+                  icono: Icons.chevron_left_rounded,
+                  onTap: () => setState(() => _selectedIndex = 0),
+                ),
+                const Text(
+                  'Planilla y Turno',
+                  style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.w700,
+                    color: AppColors.textPrimary,
                   ),
                 ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Container(
-                  padding: const EdgeInsets.all(14),
-                  decoration: BoxDecoration(color: AppColors.fondosFase[1], borderRadius: BorderRadius.circular(16)),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text('CAJA DIARIA COBRADA', style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w800, color: AppColors.kRoyalBlue)),
-                      const SizedBox(height: 4),
-                      Text('\$${_totalCobradoHoy.toStringAsFixed(2)}', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: AppColors.kRoyalBlue)),
-                      Text('${_vehiculos.length} órdenes registradas', style: const TextStyle(fontSize: 11, color: Color(0xFF1E40AF))),
-                    ],
+                _BotonIconoBorde(
+                  icono: Icons.sync_rounded,
+                  onTap: () => _obtenerDatosDeApi(mostrarMensaje: true),
+                ),
+              ],
+            ),
+            const SizedBox(height: 18),
+
+            // Cards de resumen operativo (Sin información sensible de Caja)
+            Row(
+              children: [
+                Expanded(
+                  child: Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: AppColors.fondosFase[2],
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'MI COMISIÓN / PLANILLA DE HOY',
+                          style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.w800,
+                            color: AppColors.successDark,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          '\$${_totalComisionesOperarios.toStringAsFixed(2)}',
+                          style: const TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.w900,
+                            color: AppColors.successDark,
+                          ),
+                        ),
+                        Text(
+                          '$_cantidadLavadosComision servicios asignados',
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: AppColors.successText,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 16),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: AppColors.fondosFase[1],
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'LAVADOS TERMINADOS HOY',
+                          style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.w800,
+                            color: AppColors.kRoyalBlue,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          '$_lavadosTerminadosHoy completados',
+                          style: const TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w900,
+                            color: AppColors.kRoyalBlue,
+                          ),
+                        ),
+                        Text(
+                          '$_vehiculosEnPatio en patio actualmente',
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: Color(0xFF1E40AF),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
 
-          // Filtros
-          Container(
-            padding: const EdgeInsets.all(4),
-            decoration: BoxDecoration(color: AppColors.surfaceGrey, borderRadius: BorderRadius.circular(14)),
-            child: Row(
-              children: tabs.map((t) {
-                final activo = _filtroControl == t;
-                return Expanded(
-                  child: GestureDetector(
-                    onTap: () => setState(() => _filtroControl = t),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(vertical: 9),
-                      decoration: BoxDecoration(
-                        color: activo ? Colors.white : Colors.transparent,
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      alignment: Alignment.center,
-                      child: Text(
-                        t,
-                        style: TextStyle(
-                          fontSize: 11.5,
-                          fontWeight: activo ? FontWeight.w700 : FontWeight.w500,
-                          color: activo ? AppColors.kRoyalBlue : AppColors.textMuted,
+            // Filtros
+            Container(
+              padding: const EdgeInsets.all(4),
+              decoration: BoxDecoration(
+                color: AppColors.surfaceGrey,
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: Row(
+                children: tabs.map((t) {
+                  final activo = _filtroControl == t;
+                  return Expanded(
+                    child: GestureDetector(
+                      onTap: () => setState(() => _filtroControl = t),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(vertical: 9),
+                        decoration: BoxDecoration(
+                          color: activo ? Colors.white : Colors.transparent,
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        alignment: Alignment.center,
+                        child: Text(
+                          t,
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            fontWeight:
+                                activo ? FontWeight.w700 : FontWeight.w500,
+                            color: activo
+                                ? AppColors.kRoyalBlue
+                                : AppColors.textMuted,
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                );
-              }).toList(),
+                  );
+                }).toList(),
+              ),
             ),
-          ),
-          const SizedBox(height: 20),
-          const Text('Historial de Servicios y Registro de Cobro', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
-          const Text('Toca "Cobrar" para registrar el pago y calcular comisión en planilla', style: TextStyle(fontSize: 12, color: AppColors.textHint)),
-          const SizedBox(height: 12),
-          ...filtrados.map((v) => _buildFilaOrden(v)),
-        ],
+            const SizedBox(height: 20),
+            const Text(
+              'Asignación de Operarios y Estado en Caja',
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w700,
+                color: AppColors.textPrimary,
+              ),
+            ),
+            const Text(
+              'El cobro monetario es exclusivo de Caja Web. Asigna operarios al terminar el lavado.',
+              style: TextStyle(fontSize: 12, color: AppColors.textHint),
+            ),
+            const SizedBox(height: 12),
+            ...filtrados.map((v) => _buildFilaOrden(v)),
+          ],
+        ),
       ),
     );
   }
 
   Widget _buildFilaOrden(VehiculoPatio v) {
     final color = AppColors.coloresFase[v.fase];
+    final bool terminada = v.fase == 2;
+    final bool comisionCerrada =
+        v.comisionada || _ordenesComisionadasIds.contains(v.ordenId);
+
     return Container(
       margin: const EdgeInsets.only(bottom: 10),
       padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 10),
-      decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: AppColors.border))),
+      decoration: const BoxDecoration(
+        border: Border(bottom: BorderSide(color: AppColors.border)),
+      ),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           Container(
             width: 42,
             height: 42,
-            decoration: BoxDecoration(color: AppColors.fondosFase[v.fase], borderRadius: BorderRadius.circular(12)),
+            decoration: BoxDecoration(
+              color: AppColors.fondosFase[v.fase],
+              borderRadius: BorderRadius.circular(12),
+            ),
             child: Icon(_iconosFase[v.fase], color: color, size: 20),
           ),
           const SizedBox(width: 12),
@@ -1326,31 +2438,131 @@ class _HomeScreenState extends State<HomeScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('${v.placa} • ${v.nombreCompletoCarro} (${v.categoria})', style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
-                const SizedBox(height: 2),
-                Text('${AppConstants.nombresFase[v.fase]} • ${v.cliente}', style: const TextStyle(fontSize: 12, color: AppColors.textMuted)),
+                Text(
+                  '${v.placa} • ${v.nombreCompletoCarro} (${v.categoria})',
+                  style: const TextStyle(
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w700,
+                    color: AppColors.textPrimary,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  '${AppConstants.nombresFase[v.fase]} • ${v.cliente}',
+                  style: const TextStyle(
+                      fontSize: 11.5, color: AppColors.textMuted),
+                ),
+                if (v.operariosAsignados.isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    'Operarios: ${v.operariosAsignados}',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: AppColors.kRoyalBlue,
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
+          const SizedBox(width: 8),
           Column(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
-              Text(v.totalPagar, style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w800)),
-              const SizedBox(height: 4),
-              InkWell(
-                onTap: () => _abrirModalCobro(v),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                  decoration: BoxDecoration(
-                    color: v.pagado ? AppColors.success : AppColors.kRoyalBlue,
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Text(
-                    v.pagado ? 'PAGADO' : 'Cobrar',
-                    style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold),
+              // Estado informativo de pago en Caja Web
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: v.pagado
+                      ? const Color(0xFFDCFCE7)
+                      : const Color(0xFFFEF3C7),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Text(
+                  v.pagado ? 'COBRADO EN CAJA' : 'PENDIENTE EN CAJA',
+                  style: TextStyle(
+                    fontSize: 9.5,
+                    fontWeight: FontWeight.w800,
+                    color: v.pagado
+                        ? const Color(0xFF15803D)
+                        : const Color(0xFFB45309),
                   ),
                 ),
               ),
+              const SizedBox(height: 6),
+              if (!terminada)
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: AppColors.surfaceGrey,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Text(
+                    'EN LAVADO',
+                    style: TextStyle(
+                      color: AppColors.textMuted,
+                      fontSize: 10.5,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                )
+              else if (comisionCerrada)
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFDCFCE7),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: const Color(0xFF86EFAC)),
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.lock_outline_rounded,
+                          size: 12, color: Color(0xFF15803D)),
+                      SizedBox(width: 4),
+                      Text(
+                        'COMISIÓN CERRADA',
+                        style: TextStyle(
+                          color: Color(0xFF15803D),
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ],
+                  ),
+                )
+              else
+                InkWell(
+                  onTap: () => _abrirModalAsignarOperarios(v),
+                  borderRadius: BorderRadius.circular(8),
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: AppColors.kRoyalBlue,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.group_add_rounded,
+                            size: 13, color: Colors.white),
+                        SizedBox(width: 4),
+                        Text(
+                          'Asignar Operarios',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 11,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
             ],
           ),
         ],
@@ -1366,23 +2578,42 @@ class _HomeScreenState extends State<HomeScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('Mi perfil', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+          const Text(
+            'Mi perfil',
+            style: TextStyle(
+              fontSize: 24,
+              fontWeight: FontWeight.w700,
+              color: AppColors.textPrimary,
+            ),
+          ),
           const SizedBox(height: 20),
 
           // Tarjeta de perfil
           Container(
             padding: const EdgeInsets.all(18),
-            decoration: BoxDecoration(color: AppColors.surfaceGrey, borderRadius: BorderRadius.circular(20)),
+            decoration: BoxDecoration(
+              color: AppColors.surfaceGrey,
+              borderRadius: BorderRadius.circular(20),
+            ),
             child: Row(
               children: [
                 Container(
                   width: 64,
                   height: 64,
-                  decoration: BoxDecoration(color: AppColors.kRoyalBlue, borderRadius: BorderRadius.circular(18)),
+                  decoration: BoxDecoration(
+                    color: AppColors.kRoyalBlue,
+                    borderRadius: BorderRadius.circular(18),
+                  ),
                   alignment: Alignment.center,
                   child: Text(
-                    _perfilNombre.length >= 2 ? _perfilNombre.substring(0, 2).toUpperCase() : 'US',
-                    style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold),
+                    _perfilNombre.length >= 2
+                        ? _perfilNombre.substring(0, 2).toUpperCase()
+                        : 'US',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 22,
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
                 ),
                 const SizedBox(width: 16),
@@ -1390,11 +2621,41 @@ class _HomeScreenState extends State<HomeScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(_perfilNombre, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700)),
+                      Text(
+                        _perfilNombre,
+                        style: const TextStyle(
+                          fontSize: 17,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
                       const SizedBox(height: 3),
-                      Text(_perfilRol, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: AppColors.kRoyalBlue)),
+                      Text(
+                        _perfilRol,
+                        style: const TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w700,
+                          color: AppColors.kRoyalBlue,
+                        ),
+                      ),
                       const SizedBox(height: 2),
-                      Text(_perfilCorreo, style: const TextStyle(fontSize: 12, color: AppColors.textMuted)),
+                      Text(
+                        _perfilCorreo,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: AppColors.textMuted,
+                        ),
+                      ),
+                      if (_perfilUsuarioId > 0) ...[
+                        const SizedBox(height: 2),
+                        Text(
+                          'ID Empleado: #$_perfilUsuarioId • Cuenta Activa',
+                          style: const TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            color: AppColors.successDark,
+                          ),
+                        ),
+                      ],
                     ],
                   ),
                 ),
@@ -1410,7 +2671,7 @@ class _HomeScreenState extends State<HomeScreen> {
             child: TextButton.icon(
               onPressed: () async {
                 await _apiService.logout();
-                if (context.mounted) {
+                if (mounted) {
                   Navigator.pushReplacement(
                     context,
                     MaterialPageRoute(builder: (_) => const LoginScreen()),
@@ -1421,10 +2682,15 @@ class _HomeScreenState extends State<HomeScreen> {
                 backgroundColor: AppColors.errorBg,
                 foregroundColor: AppColors.errorText,
                 padding: const EdgeInsets.symmetric(vertical: 16),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                ),
               ),
               icon: const Icon(Icons.logout_rounded),
-              label: const Text('Cerrar sesión', style: TextStyle(fontWeight: FontWeight.bold)),
+              label: const Text(
+                'Cerrar sesión',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
             ),
           ),
         ],
