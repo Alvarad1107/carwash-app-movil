@@ -859,9 +859,9 @@ class _HomeScreenState extends State<HomeScreen> {
                 final clienteId = encontrado['cliente_id'];
                 vehiculoClienteIdExistente =
                     int.tryParse(clienteId?.toString() ?? '');
-                if (clienteId != null) {
+                if (vehiculoClienteIdExistente != null) {
                   final cliente = _listaClientesLocal.firstWhere(
-                    (c) => c['id'] == clienteId,
+                    (c) => c['id'] == vehiculoClienteIdExistente,
                     orElse: () => null,
                   );
                   if (cliente != null) {
@@ -1394,28 +1394,17 @@ class _HomeScreenState extends State<HomeScreen> {
                       },
                       onSelected: (Map<String, dynamic> cliente) {
                         setModalState(() {
-                          final int? nuevoClienteId =
-                              int.tryParse(cliente['id']?.toString() ?? '');
-                          // Si había una placa cargada de otro cliente, limpiar el vehículo para registrar uno nuevo
-                          if (vehiculoIdExistente != null &&
-                              vehiculoClienteIdExistente != nuevoClienteId) {
-                            cuerpoPlacaCtrl?.clear();
-                            marcaCtrl.clear();
-                            modeloCtrl.clear();
-                            colorCtrl.clear();
-                            vehiculoIdExistente = null;
-                            vehiculoClienteIdExistente = null;
-                          }
+                          prefijoSeleccionado = 'P';
+                          cuerpoPlacaCtrl?.clear();
+                          marcaCtrl.clear();
+                          modeloCtrl.clear();
+                          colorCtrl.clear();
+                          vehiculoIdExistente = null;
+                          vehiculoClienteIdExistente = null;
                           clienteIdExistente = cliente['id'];
-                          if (cliente['telefono'] != null &&
-                              cliente['telefono']
-                                  .toString()
-                                  .trim()
-                                  .isNotEmpty) {
-                            telefonoCtrl.text = _formatearTelefonoSV(
-                              cliente['telefono'].toString(),
-                            );
-                          }
+                          telefonoCtrl.text = _formatearTelefonoSV(
+                            (cliente['telefono'] ?? '').toString(),
+                          );
                           correoCtrl.text =
                               (cliente['correo'] ?? '').toString().trim();
                         });
@@ -1432,7 +1421,18 @@ class _HomeScreenState extends State<HomeScreen> {
                           focusNode: focusNode,
                           onChanged: (val) {
                             if (clienteIdExistente != null) {
-                              setModalState(() => clienteIdExistente = null);
+                              setModalState(() {
+                                clienteIdExistente = null;
+                                telefonoCtrl.clear();
+                                correoCtrl.clear();
+                                prefijoSeleccionado = 'P';
+                                cuerpoPlacaCtrl?.clear();
+                                marcaCtrl.clear();
+                                modeloCtrl.clear();
+                                colorCtrl.clear();
+                                vehiculoIdExistente = null;
+                                vehiculoClienteIdExistente = null;
+                              });
                             }
                           },
                           decoration: InputDecoration(

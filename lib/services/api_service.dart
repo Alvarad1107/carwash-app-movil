@@ -1086,12 +1086,11 @@ class ApiService {
         targetClienteId = resCli['id'];
       }
 
-      // 2. Resolver el vehículo (si ya existe, actualizar datos técnicos y último cliente que lo lavó)
+      // 2. Resolver el vehículo (si ya existe, actualizar datos técnicos conservando el titular original)
       if (vehiculoIdExistente != null && vehiculoIdExistente > 0) {
         targetVehiculoId = vehiculoIdExistente;
         await actualizarVehiculoParcial(
           vehiculoId: vehiculoIdExistente,
-          clienteId: targetClienteId,
           categoriaId: categoriaId,
           marca: marca,
           modelo: modelo,
