@@ -1394,13 +1394,15 @@ class _HomeScreenState extends State<HomeScreen> {
                       },
                       onSelected: (Map<String, dynamic> cliente) {
                         setModalState(() {
-                          prefijoSeleccionado = 'P';
-                          cuerpoPlacaCtrl?.clear();
-                          marcaCtrl.clear();
-                          modeloCtrl.clear();
-                          colorCtrl.clear();
-                          vehiculoIdExistente = null;
-                          vehiculoClienteIdExistente = null;
+                          if (vehiculoIdExistente != null) {
+                            prefijoSeleccionado = 'P';
+                            cuerpoPlacaCtrl?.clear();
+                            marcaCtrl.clear();
+                            modeloCtrl.clear();
+                            colorCtrl.clear();
+                            vehiculoIdExistente = null;
+                            vehiculoClienteIdExistente = null;
+                          }
                           clienteIdExistente = cliente['id'];
                           telefonoCtrl.text = _formatearTelefonoSV(
                             (cliente['telefono'] ?? '').toString(),
@@ -1425,13 +1427,15 @@ class _HomeScreenState extends State<HomeScreen> {
                                 clienteIdExistente = null;
                                 telefonoCtrl.clear();
                                 correoCtrl.clear();
-                                prefijoSeleccionado = 'P';
-                                cuerpoPlacaCtrl?.clear();
-                                marcaCtrl.clear();
-                                modeloCtrl.clear();
-                                colorCtrl.clear();
-                                vehiculoIdExistente = null;
-                                vehiculoClienteIdExistente = null;
+                                if (vehiculoIdExistente != null) {
+                                  prefijoSeleccionado = 'P';
+                                  cuerpoPlacaCtrl?.clear();
+                                  marcaCtrl.clear();
+                                  modeloCtrl.clear();
+                                  colorCtrl.clear();
+                                  vehiculoIdExistente = null;
+                                  vehiculoClienteIdExistente = null;
+                                }
                               });
                             }
                           },
@@ -1682,6 +1686,52 @@ class _HomeScreenState extends State<HomeScreen> {
                       onPressed: ordenActivaPatio != null
                           ? null
                           : () async {
+                              void mostrarAlerta(String mensaje) {
+                                showDialog(
+                                  context: context,
+                                  builder: (ctx) => AlertDialog(
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(16),
+                                    ),
+                                    title: const Row(
+                                      children: [
+                                        Icon(
+                                          Icons.warning_amber_rounded,
+                                          color: Color(0xFFD97706),
+                                          size: 24,
+                                        ),
+                                        SizedBox(width: 8),
+                                        Text(
+                                          'Dato requerido o inválido',
+                                          style: TextStyle(
+                                            fontSize: 16,
+                                            fontWeight: FontWeight.bold,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    content: Text(
+                                      mensaje,
+                                      style: const TextStyle(fontSize: 13.5),
+                                    ),
+                                    actions: [
+                                      ElevatedButton(
+                                        onPressed: () => Navigator.pop(ctx),
+                                        style: ElevatedButton.styleFrom(
+                                          backgroundColor: AppColors.kRoyalBlue,
+                                          foregroundColor: Colors.white,
+                                          shape: RoundedRectangleBorder(
+                                            borderRadius:
+                                                BorderRadius.circular(10),
+                                          ),
+                                        ),
+                                        child: const Text('Entendido'),
+                                      ),
+                                    ],
+                                  ),
+                                );
+                              }
+
                               final String cuerpo =
                                   (cuerpoPlacaCtrl?.text ?? '')
                                       .trim()
@@ -1700,14 +1750,8 @@ class _HomeScreenState extends State<HomeScreen> {
                               // 1. Validar Placa Salvadoreña Estricta
                               if (!RegExp(r'^[A-Z0-9]{3,6}$')
                                   .hasMatch(cuerpo)) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content: Text(
-                                      '⚠️ Ingresa de 3 a 6 caracteres alfanuméricos para la placa (Ej. P-123456).',
-                                    ),
-                                    backgroundColor: Colors.redAccent,
-                                    behavior: SnackBarBehavior.floating,
-                                  ),
+                                mostrarAlerta(
+                                  'Ingresa de 3 a 6 caracteres alfanuméricos para la placa (Ej. P-123456).',
                                 );
                                 return;
                               }
@@ -1717,14 +1761,8 @@ class _HomeScreenState extends State<HomeScreen> {
                               final VehiculoPatio? yaEnLavado =
                                   _buscarOrdenActivaPorPlaca(placaCompleta);
                               if (yaEnLavado != null) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(
-                                    content: Text(
-                                      '⚠️ Este vehículo ya está en lavado en ${yaEnLavado.bahia}.',
-                                    ),
-                                    backgroundColor: Colors.redAccent,
-                                    behavior: SnackBarBehavior.floating,
-                                  ),
+                                mostrarAlerta(
+                                  'Este vehículo ya está en lavado en ${yaEnLavado.bahia}.',
                                 );
                                 return;
                               }
@@ -1734,27 +1772,16 @@ class _HomeScreenState extends State<HomeScreen> {
                                   modelo.isEmpty ||
                                   color.isEmpty ||
                                   color.toUpperCase() == 'N/A') {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content: Text(
-                                      '⚠️ Marca, Modelo y Color del vehículo son obligatorios.',
-                                    ),
-                                    backgroundColor: Colors.redAccent,
-                                    behavior: SnackBarBehavior.floating,
-                                  ),
+                                mostrarAlerta(
+                                  'Marca, Modelo y Color del vehículo son obligatorios.',
                                 );
                                 return;
                               }
 
                               // 3. Validar Nombre del Cliente
                               if (nombreCli.isEmpty) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content: Text(
-                                        '⚠️ El nombre del cliente es obligatorio.'),
-                                    backgroundColor: Colors.redAccent,
-                                    behavior: SnackBarBehavior.floating,
-                                  ),
+                                mostrarAlerta(
+                                  'El nombre del cliente es obligatorio.',
                                 );
                                 return;
                               }
@@ -1762,14 +1789,8 @@ class _HomeScreenState extends State<HomeScreen> {
                               // 4. Validar Teléfono 0000-0000 y duplicados
                               if (!RegExp(r'^\d{4}-\d{4}$')
                                   .hasMatch(telefonoCli)) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content: Text(
-                                      '⚠️ El teléfono debe tener 8 dígitos en formato 0000-0000.',
-                                    ),
-                                    backgroundColor: Colors.redAccent,
-                                    behavior: SnackBarBehavior.floating,
-                                  ),
+                                mostrarAlerta(
+                                  'El teléfono debe tener 8 dígitos en formato 0000-0000.',
                                 );
                                 return;
                               }
@@ -1784,14 +1805,8 @@ class _HomeScreenState extends State<HomeScreen> {
                                   );
                                   if (telC == telefonoCli &&
                                       cid != (clienteIdExistente ?? -1)) {
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      SnackBar(
-                                        content: Text(
-                                          '⚠️ El teléfono $telefonoCli ya pertenece a otro cliente (${c['nombre_completo']}).',
-                                        ),
-                                        backgroundColor: Colors.redAccent,
-                                        behavior: SnackBarBehavior.floating,
-                                      ),
+                                    mostrarAlerta(
+                                      'El teléfono $telefonoCli ya pertenece a otro cliente (${c['nombre_completo']}).',
                                     );
                                     return;
                                   }
@@ -1802,14 +1817,8 @@ class _HomeScreenState extends State<HomeScreen> {
                               if (correoCli.isNotEmpty) {
                                 if (!RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
                                     .hasMatch(correoCli)) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(
-                                      content: Text(
-                                        '⚠️ El formato del correo electrónico no es válido.',
-                                      ),
-                                      backgroundColor: Colors.redAccent,
-                                      behavior: SnackBarBehavior.floating,
-                                    ),
+                                  mostrarAlerta(
+                                    'El formato del correo electrónico no es válido.',
                                   );
                                   return;
                                 }
@@ -1825,14 +1834,8 @@ class _HomeScreenState extends State<HomeScreen> {
                                   if (corC.isNotEmpty &&
                                       corC == correoCli &&
                                       cid != (clienteIdExistente ?? -1)) {
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      SnackBar(
-                                        content: Text(
-                                          '⚠️ El correo $correoCli ya está registrado con otro cliente (${c['nombre_completo']}).',
-                                        ),
-                                        backgroundColor: Colors.redAccent,
-                                        behavior: SnackBarBehavior.floating,
-                                      ),
+                                    mostrarAlerta(
+                                      'El correo $correoCli ya está registrado con otro cliente (${c['nombre_completo']}).',
                                     );
                                     return;
                                   }
@@ -1920,12 +1923,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
                               if (result['success'] != true) {
                                 if (context.mounted) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    SnackBar(
-                                      content:
-                                          Text('Error: ${result['error']}'),
-                                      backgroundColor: Colors.redAccent,
-                                    ),
+                                  mostrarAlerta(
+                                    'Error al registrar orden: ${result['error']}',
                                   );
                                 }
                                 return;
