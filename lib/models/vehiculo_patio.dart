@@ -21,6 +21,7 @@ class VehiculoPatio {
   final String fechaHoraTexto;
   final String operariosAsignados;
   final double comisionOrden;
+  final int vecesPospuesta;
   int fase; // 0=Pendiente, 1=En proceso, 2=Terminado
   bool pagado;
   bool comisionada;
@@ -46,6 +47,7 @@ class VehiculoPatio {
     this.fechaHoraTexto = '',
     this.operariosAsignados = '',
     this.comisionOrden = 0.0,
+    this.vecesPospuesta = 0,
     this.fase = 0,
     this.pagado = false,
     this.comisionada = false,

@@ -73,7 +73,13 @@ class _HomeScreenState extends State<HomeScreen> {
   int _lavadosTerminadosHoy = 0;
   int _vehiculosEnPatio = 0;
 
-  // Catálogos y listas en memoria RAM sincronizadas desde la API
+  // Estado de horario oficial de recepción en El Salvador desde GET /ordenes/estado-horario
+  bool _recepcionAbierta = true;
+  bool _enVentanaProrroga = false;
+  String _horaSv = '';
+  String _mensajeHorario = '';
+
+  // Catálogos y listas en memoria RAM sincronizadas 100% desde la API REST
   List<dynamic> _listaClientesLocal = [];
   List<dynamic> _listaVehiculosLocal = [];
   List<dynamic> _bahiasApi = [];
@@ -103,7 +109,7 @@ class _HomeScreenState extends State<HomeScreen> {
     return false;
   }
 
-  /// Determina si una bahía está ocupada por un vehículo en proceso o pendiente
+  /// Determina si una bahía está ocupada por un vehículo en proceso o pendiente hoy
   bool _bahiaOcupada(int numero) {
     return _vehiculos.any((v) =>
         (v.bahiaId == numero ||
@@ -112,8 +118,17 @@ class _HomeScreenState extends State<HomeScreen> {
         (v.fase == 1 || v.fase == 0));
   }
 
-  /// Busca de forma inteligente la primera bahía libre (1 a 6) que no esté ocupada ni en mantenimiento
+  /// Busca de forma inteligente la primera bahía libre según las bahías reales de GET /bahias/
   int? _primeraBahiaLibre() {
+    if (_bahiasApi.isNotEmpty) {
+      for (final b in _bahiasApi) {
+        final int bid = int.tryParse(b['id']?.toString() ?? '0') ?? 0;
+        if (bid > 0 && !_bahiaOcupada(bid) && !_bahiaEnMantenimiento(bid)) {
+          return bid;
+        }
+      }
+      return null;
+    }
     for (int i = 1; i <= AppConstants.totalBahias; i++) {
       if (!_bahiaOcupada(i) && !_bahiaEnMantenimiento(i)) return i;
     }
@@ -163,7 +178,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _obtenerDatosDeApi({bool mostrarMensaje = false}) async {
     setState(() => _cargandoApi = true);
     try {
-      // Candado de seguridad: verificar si el usuario fue desactivado por el Administrador
+      // Candado de seguridad: verificar si el usuario fue desactivado o cambiado de rol por el Administrador
       final activo = await _apiService.verificarUsuarioActivo(context);
       if (!activo || !mounted) return;
 
@@ -195,11 +210,15 @@ class _HomeScreenState extends State<HomeScreen> {
               (result['serviciosBase'] as List<Map<String, dynamic>>?) ?? [];
           _serviciosAdicionalesApi =
               (result['serviciosAdicionales'] as List<ServicioExtraModel>?) ??
-                  ServicioExtraModel.obtenerListaDefecto();
+                  [];
           _listaClientesLocal =
               (result['clientesDirectorio'] as List<dynamic>?) ?? [];
           _listaVehiculosLocal =
               (result['vehiculosDirectorio'] as List<dynamic>?) ?? [];
+          _recepcionAbierta = (result['recepcionAbierta'] as bool?) ?? true;
+          _enVentanaProrroga = (result['enVentanaProrroga'] as bool?) ?? false;
+          _horaSv = (result['horaSv'] ?? '').toString();
+          _mensajeHorario = (result['mensajeHorario'] ?? '').toString();
           _conectadoConApi = true;
         });
 
@@ -345,6 +364,85 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  /// Posponer una orden Pendiente para mañana a primera hora (07:00 AM SV).
+  /// Solo permitido 1 vez por orden para liberar la bahía física de hoy.
+  Future<void> _confirmarPosponerOrden(VehiculoPatio v) async {
+    if (v.fase != 0 || v.vecesPospuesta >= 1) return;
+
+    final bool? confirmar = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+        title: const Row(
+          children: [
+            Icon(Icons.event_repeat_rounded, color: Color(0xFFD97706)),
+            SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'Posponer orden para mañana',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              ),
+            ),
+          ],
+        ),
+        content: Text(
+          '¿Posponer la orden #${v.ordenId} (${v.placa}) para mañana a las 07:00 AM?\n\n'
+          '• Se liberará la ${v.bahia} en el turno de hoy.\n'
+          '• Esta acción solo se permite realizar 1 vez por orden.',
+          style: const TextStyle(
+            fontSize: 13.5,
+            color: AppColors.textSecondary,
+            height: 1.4,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancelar'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFD97706),
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10)),
+            ),
+            child: const Text('Sí, posponer (1/1)'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmar != true) return;
+
+    final res = await _apiService.posponerOrden(v.ordenId);
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).clearSnackBars();
+    if (res['success'] == true) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          backgroundColor: const Color(0xFFD97706),
+          behavior: SnackBarBehavior.floating,
+          content: Text(
+            'Orden #${v.ordenId} (${v.placa}) pospuesta para mañana a las 7:00 AM. ${v.bahia} liberada hoy.',
+            style: const TextStyle(fontWeight: FontWeight.bold),
+          ),
+        ),
+      );
+      await _obtenerDatosDeApi();
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          backgroundColor: Colors.redAccent,
+          behavior: SnackBarBehavior.floating,
+          content: Text('Error: ${res['error']}'),
+        ),
+      );
+    }
+  }
+
   /// Modal para asignar 1 operario (Lavado Individual) o 2+ operarios (Lavado Simultáneo)
   /// a una orden terminada (fase == 2), respetando el candado de inmutabilidad.
   Future<void> _abrirModalAsignarOperarios(VehiculoPatio v) async {
@@ -376,23 +474,21 @@ class _HomeScreenState extends State<HomeScreen> {
       return;
     }
 
-    final List<Map<String, dynamic>> operariosDisponibles =
-        _operariosActivos.isNotEmpty
-            ? _operariosActivos
-            : [
-                {
-                  'id': 3,
-                  'nombre_completo': 'Erick Herrera',
-                  'rol_id': 3,
-                  'estado': 1
-                },
-                {
-                  'id': 4,
-                  'nombre_completo': 'Edenilson Escamilla',
-                  'rol_id': 3,
-                  'estado': 1
-                },
-              ];
+    // 100% API REST: Sin respaldos quemados de operarios
+    final List<Map<String, dynamic>> operariosDisponibles = _operariosActivos;
+    if (operariosDisponibles.isEmpty) {
+      ScaffoldMessenger.of(context).clearSnackBars();
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            '⚠️ No hay operarios activos disponibles en la API (/finanzas/usuarios).',
+          ),
+          backgroundColor: Colors.redAccent,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
 
     final Set<int> seleccionados = {};
     // Preseleccionar al operario logueado si está en la lista de operarios activos
@@ -404,9 +500,9 @@ class _HomeScreenState extends State<HomeScreen> {
     }
     if (seleccionados.isEmpty && operariosDisponibles.isNotEmpty) {
       final int primerId =
-          int.tryParse(operariosDisponibles.first['id']?.toString() ?? '3') ??
-              3;
-      seleccionados.add(primerId);
+          int.tryParse(operariosDisponibles.first['id']?.toString() ?? '0') ??
+              0;
+      if (primerId > 0) seleccionados.add(primerId);
     }
 
     bool enviando = false;
@@ -433,7 +529,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        '${v.placa} • ${v.nombreCompletoCarro} (${v.categoria})',
+                        '${v.placa} • ${v.nombreCompletoCarro} (${v.color} • ${v.categoria})',
                         style: const TextStyle(
                           fontSize: 13,
                           fontWeight: FontWeight.w700,
@@ -614,23 +710,58 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  /// Modal de Recepción de Vehículo con selector estricto de placa SV (19 prefijos + máx 6 alfanuméricos),
-  /// bloqueo de orden duplicada en patio, selector de Servicio Base (Tabla 5.1),
-  /// teléfono con máscara 0000-0000 y correo electrónico para pre-factura.
+  /// Modal de Recepción de Vehículo 100% conectado a la API REST:
+  /// - Valida horario oficial de recepción en El Salvador (7:00 AM - 5:00 PM) y ventana 4:45 PM - 5:00 PM.
+  /// - Selector de placa SV (19 prefijos + máx 6 alfanuméricos) y bloqueo de orden duplicada.
+  /// - Catálogos dinámicos desde la API (Categorías, Servicios Base, Matriz de Precios y Extras).
+  /// - Atajo rápido "Consumidor Final" y preservación del dueño titular del vehículo.
   void _abrirModalRecepcion() {
+    // 1. Validar horario oficial de recepción en El Salvador (7:00 AM - 5:00 PM)
+    if (!_recepcionAbierta) {
+      ScaffoldMessenger.of(context).clearSnackBars();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            _mensajeHorario.isNotEmpty
+                ? '⛔ $_mensajeHorario'
+                : '⛔ Recepción cerrada: El horario para recibir vehículos es de 7:00 AM a 5:00 PM.',
+          ),
+          backgroundColor: Colors.redAccent,
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 4),
+        ),
+      );
+      return;
+    }
+
     final int? bahiaLibre = _primeraBahiaLibre();
     if (bahiaLibre == null) {
       ScaffoldMessenger.of(context).clearSnackBars();
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
-            '⚠️ Todas las bahías disponibles están ocupadas o en mantenimiento. Finaliza un lavado antes de recibir otro vehículo.',
+            '⚠️ Todas las bahías disponibles están ocupadas o en mantenimiento. Finaliza o pospone un lavado antes de recibir otro vehículo.',
           ),
           backgroundColor: Colors.redAccent,
           behavior: SnackBarBehavior.floating,
           duration: Duration(seconds: 4),
         ),
       );
+      return;
+    }
+
+    if (_categoriasApi.isEmpty || _serviciosBaseApi.isEmpty) {
+      ScaffoldMessenger.of(context).clearSnackBars();
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            '⚠️ Sincronizando catálogos desde la API REST. Intenta de nuevo en unos segundos.',
+          ),
+          backgroundColor: Colors.orange,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      _obtenerDatosDeApi();
       return;
     }
 
@@ -646,12 +777,12 @@ class _HomeScreenState extends State<HomeScreen> {
     final telefonoCtrl = TextEditingController();
     final correoCtrl = TextEditingController();
 
-    int categoriaIdSeleccionada = 1;
-    int servicioBaseIdSeleccionado = 1;
+    int categoriaIdSeleccionada =
+        int.tryParse(_categoriasApi.first['id']?.toString() ?? '1') ?? 1;
+    int servicioBaseIdSeleccionado =
+        int.tryParse(_serviciosBaseApi.first['id']?.toString() ?? '1') ?? 1;
 
-    final List<ServicioExtraModel> extras = (_serviciosAdicionalesApi.isNotEmpty
-            ? _serviciosAdicionalesApi
-            : ServicioExtraModel.obtenerListaDefecto())
+    final List<ServicioExtraModel> extras = _serviciosAdicionalesApi
         .map((e) => ServicioExtraModel(
               id: e.id,
               nombre: e.nombre,
@@ -660,15 +791,6 @@ class _HomeScreenState extends State<HomeScreen> {
               seleccionado: false,
             ))
         .toList();
-
-    final List<Map<String, dynamic>> serviciosBaseOpciones =
-        _serviciosBaseApi.isNotEmpty
-            ? _serviciosBaseApi
-            : [
-                {'id': 1, 'nombre': 'Lavado Básico'},
-                {'id': 2, 'nombre': 'Pasteado a Mano'},
-                {'id': 3, 'nombre': 'Pasteado a Máquina'},
-              ];
 
     showModalBottomSheet(
       context: context,
@@ -693,7 +815,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     ? _buscarOrdenActivaPorPlaca(placaCompletaActual)
                     : null;
 
-            // Cálculo dinámico de precios según Matriz (Tabla 5.1) + Extras + 13% IVA
+            // Cálculo dinámico de precios según Matriz de la API + Extras + 13% IVA
             final double precioBaseEst = _apiService.obtenerPrecioMatriz(
               categoriaIdSeleccionada,
               servicioBaseIdSeleccionado,
@@ -719,13 +841,20 @@ class _HomeScreenState extends State<HomeScreen> {
                 vehiculoIdExistente = encontrado['id'];
                 marcaCtrl.text = (encontrado['marca'] ?? '').toString();
                 modeloCtrl.text = (encontrado['modelo'] ?? '').toString();
-                colorCtrl.text = (encontrado['color'] ?? '').toString();
+                final String colorBd = (encontrado['color'] ?? '').toString();
+                colorCtrl.text =
+                    (colorBd.toUpperCase() == 'N/A') ? '' : colorBd;
+
                 final int? catId = int.tryParse(
                   encontrado['categoria_vehiculo_id']?.toString() ?? '',
                 );
-                if (catId != null && catId >= 1 && catId <= 6) {
+                if (catId != null &&
+                    _categoriasApi.any((c) =>
+                        (int.tryParse(c['id']?.toString() ?? '0') ?? 0) ==
+                        catId)) {
                   categoriaIdSeleccionada = catId;
                 }
+
                 final clienteId = encontrado['cliente_id'];
                 if (clienteId != null) {
                   final cliente = _listaClientesLocal.firstWhere(
@@ -733,13 +862,17 @@ class _HomeScreenState extends State<HomeScreen> {
                     orElse: () => null,
                   );
                   if (cliente != null) {
-                    clienteIdExistente = cliente['id'];
-                    clienteInputCtrl?.text =
-                        (cliente['nombre_completo'] ?? '').toString();
-                    telefonoCtrl.text = _formatearTelefonoSV(
-                      (cliente['telefono'] ?? '').toString(),
-                    );
-                    correoCtrl.text = (cliente['correo'] ?? '').toString();
+                    // Sugerir el último cliente que trajo esa placa si el operario no ha elegido otro cliente
+                    if (clienteIdExistente == null ||
+                        (clienteInputCtrl?.text.trim().isEmpty ?? true)) {
+                      clienteIdExistente = cliente['id'];
+                      clienteInputCtrl?.text =
+                          (cliente['nombre_completo'] ?? '').toString();
+                      telefonoCtrl.text = _formatearTelefonoSV(
+                        (cliente['telefono'] ?? '').toString(),
+                      );
+                      correoCtrl.text = (cliente['correo'] ?? '').toString();
+                    }
                   }
                 }
               } else {
@@ -797,7 +930,40 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                       ],
                     ),
-                    const SizedBox(height: 12),
+                    const SizedBox(height: 10),
+
+                    // Banner de advertencia en ventana 4:45 PM - 5:00 PM SV
+                    if (_enVentanaProrroga)
+                      Container(
+                        margin: const EdgeInsets.only(bottom: 10),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFFEF3C7),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: const Color(0xFFF59E0B)),
+                        ),
+                        child: Row(
+                          children: [
+                            const Icon(
+                              Icons.schedule_rounded,
+                              size: 18,
+                              color: Color(0xFFB45309),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                'Aviso ($_horaSv SV • 4:45 PM - 5:00 PM): Esta orden se programará automáticamente para mañana a las 7:00 AM.',
+                                style: const TextStyle(
+                                  fontSize: 11.5,
+                                  color: Color(0xFF92400E),
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
 
                     // Alerta Roja Inmediata si el vehículo ya está en lavado en patio
                     if (ordenActivaPatio != null)
@@ -861,40 +1027,9 @@ class _HomeScreenState extends State<HomeScreen> {
                             ),
                           ],
                         ),
-                      )
-                    else if (clienteIdExistente != null)
-                      Container(
-                        margin: const EdgeInsets.only(bottom: 10),
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 10, vertical: 6),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFFDBEAFE),
-                          borderRadius: BorderRadius.circular(8),
-                          border: Border.all(color: const Color(0xFF93C5FD)),
-                        ),
-                        child: Row(
-                          children: [
-                            const Icon(
-                              Icons.person_pin_rounded,
-                              size: 15,
-                              color: AppColors.kRoyalBlue,
-                            ),
-                            const SizedBox(width: 6),
-                            Expanded(
-                              child: Text(
-                                'Cliente existente (#$clienteIdExistente) - Se asociará a este cliente',
-                                style: const TextStyle(
-                                  fontSize: 11.5,
-                                  color: Color(0xFF1E40AF),
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
                       ),
 
-                    // Selector de Prefijo SV (19 opciones) + Cuerpo Alfanumérico (máx 6) + Color
+                    // Selector de Prefijo SV (19 opciones) + Cuerpo Alfanumérico (máx 6) + Color obligatorio
                     Row(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
@@ -973,42 +1108,9 @@ class _HomeScreenState extends State<HomeScreen> {
                               setModalState(() {
                                 prefijoSeleccionado = partes['prefijo'] ?? 'P';
                                 cuerpoPlacaCtrl?.text = partes['cuerpo'] ?? '';
-                                vehiculoIdExistente = vehiculo['id'];
-                                marcaCtrl.text =
-                                    (vehiculo['marca'] ?? '').toString();
-                                modeloCtrl.text =
-                                    (vehiculo['modelo'] ?? '').toString();
-                                colorCtrl.text =
-                                    (vehiculo['color'] ?? '').toString();
-
-                                final int? catId = int.tryParse(
-                                  vehiculo['categoria_vehiculo_id']
-                                          ?.toString() ??
-                                      '',
+                                sincronizarVehiculoPorPlaca(
+                                  '${partes['prefijo'] ?? 'P'}-${partes['cuerpo'] ?? ''}',
                                 );
-                                if (catId != null && catId >= 1 && catId <= 6) {
-                                  categoriaIdSeleccionada = catId;
-                                }
-
-                                final clienteId = vehiculo['cliente_id'];
-                                if (clienteId != null) {
-                                  final cliente =
-                                      _listaClientesLocal.firstWhere(
-                                    (c) => c['id'] == clienteId,
-                                    orElse: () => null,
-                                  );
-                                  if (cliente != null) {
-                                    clienteIdExistente = cliente['id'];
-                                    clienteInputCtrl?.text =
-                                        (cliente['nombre_completo'] ?? '')
-                                            .toString();
-                                    telefonoCtrl.text = _formatearTelefonoSV(
-                                      (cliente['telefono'] ?? '').toString(),
-                                    );
-                                    correoCtrl.text =
-                                        (cliente['correo'] ?? '').toString();
-                                  }
-                                }
                               });
                             },
                             fieldViewBuilder: (
@@ -1087,6 +1189,8 @@ class _HomeScreenState extends State<HomeScreen> {
                                             (opt['marca'] ?? '').toString();
                                         final String mod =
                                             (opt['modelo'] ?? '').toString();
+                                        final String col =
+                                            (opt['color'] ?? '').toString();
                                         final activo =
                                             _buscarOrdenActivaPorPlaca(p) !=
                                                 null;
@@ -1140,8 +1244,9 @@ class _HomeScreenState extends State<HomeScreen> {
                                                 Expanded(
                                                   child: Text(
                                                     activo
-                                                        ? '$m $mod (En lavado)'
-                                                        : '$m $mod'.trim(),
+                                                        ? '$m $mod ($col • En lavado)'
+                                                        : '$m $mod ($col)'
+                                                            .trim(),
                                                     style: const TextStyle(
                                                       fontSize: 12.5,
                                                       fontWeight:
@@ -1167,8 +1272,8 @@ class _HomeScreenState extends State<HomeScreen> {
                           child: TextField(
                             controller: colorCtrl,
                             decoration: const InputDecoration(
-                              labelText: 'Color',
-                              hintText: 'Gris',
+                              labelText: 'Color *',
+                              hintText: 'Ej. Blanco',
                               border: OutlineInputBorder(),
                             ),
                           ),
@@ -1177,14 +1282,15 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                     const SizedBox(height: 10),
 
-                    // Marca y Modelo
+                    // Marca y Modelo obligatorios
                     Row(
                       children: [
                         Expanded(
                           child: TextField(
                             controller: marcaCtrl,
                             decoration: const InputDecoration(
-                              labelText: 'Marca (ej. Toyota)',
+                              labelText: 'Marca *',
+                              hintText: 'Ej. Toyota',
                               border: OutlineInputBorder(),
                             ),
                           ),
@@ -1194,7 +1300,8 @@ class _HomeScreenState extends State<HomeScreen> {
                           child: TextField(
                             controller: modeloCtrl,
                             decoration: const InputDecoration(
-                              labelText: 'Modelo (ej. Corolla)',
+                              labelText: 'Modelo *',
+                              hintText: 'Ej. Corolla',
                               border: OutlineInputBorder(),
                             ),
                           ),
@@ -1203,7 +1310,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                     const SizedBox(height: 10),
 
-                    // Selector de Categoría de Vehículo sincronizado con Tabla 5.1 del TDR
+                    // Selector de Categoría de Vehículo 100% desde _categoriasApi
                     DropdownButtonFormField<int>(
                       // ignore: deprecated_member_use
                       value: categoriaIdSeleccionada,
@@ -1211,15 +1318,11 @@ class _HomeScreenState extends State<HomeScreen> {
                         labelText: 'Categoría de Vehículo (Tabla 5.1)',
                         border: OutlineInputBorder(),
                       ),
-                      items: [1, 2, 3, 4, 5, 6].map((catId) {
-                        String nombreCat = ApiService.nombreCategoria(catId);
-                        for (final c in _categoriasApi) {
-                          if ((int.tryParse(c['id']?.toString() ?? '0') ?? 0) ==
-                              catId) {
-                            nombreCat = (c['nombre'] ?? nombreCat).toString();
-                            break;
-                          }
-                        }
+                      items: _categoriasApi.map((c) {
+                        final int catId =
+                            int.tryParse(c['id']?.toString() ?? '1') ?? 1;
+                        final String nombreCat =
+                            (c['nombre'] ?? 'Categoría #$catId').toString();
                         final double pBase = _apiService.obtenerPrecioMatriz(
                           catId,
                           servicioBaseIdSeleccionado,
@@ -1238,7 +1341,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                     const SizedBox(height: 10),
 
-                    // Selector de Servicio Base (Tabla 5.1 del TDR: Lavado Básico, Pasteado a Mano, Pasteado a Máquina)
+                    // Selector de Servicio Base 100% desde _serviciosBaseApi
                     DropdownButtonFormField<int>(
                       // ignore: deprecated_member_use
                       value: servicioBaseIdSeleccionado,
@@ -1248,11 +1351,11 @@ class _HomeScreenState extends State<HomeScreen> {
                             Icon(Icons.local_car_wash_rounded, size: 20),
                         border: OutlineInputBorder(),
                       ),
-                      items: serviciosBaseOpciones.map((sb) {
+                      items: _serviciosBaseApi.map((sb) {
                         final int sbId =
                             int.tryParse(sb['id']?.toString() ?? '1') ?? 1;
                         final String sbNombre =
-                            (sb['nombre'] ?? 'Lavado Básico').toString();
+                            (sb['nombre'] ?? 'Servicio #$sbId').toString();
                         final double precioSb = _apiService.obtenerPrecioMatriz(
                           categoriaIdSeleccionada,
                           sbId,
@@ -1300,11 +1403,8 @@ class _HomeScreenState extends State<HomeScreen> {
                               cliente['telefono'].toString(),
                             );
                           }
-                          if (cliente['correo'] != null &&
-                              cliente['correo'].toString().trim().isNotEmpty) {
-                            correoCtrl.text =
-                                cliente['correo'].toString().trim();
-                          }
+                          correoCtrl.text =
+                              (cliente['correo'] ?? '').toString().trim();
                         });
                       },
                       fieldViewBuilder: (
@@ -1580,6 +1680,9 @@ class _HomeScreenState extends State<HomeScreen> {
                                   telefonoCtrl.text.trim();
                               final String correoCli =
                                   correoCtrl.text.trim().toLowerCase();
+                              final String marca = marcaCtrl.text.trim();
+                              final String modelo = modeloCtrl.text.trim();
+                              final String color = colorCtrl.text.trim();
 
                               // 1. Validar Placa Salvadoreña Estricta
                               if (!RegExp(r'^[A-Z0-9]{3,6}$')
@@ -1613,7 +1716,24 @@ class _HomeScreenState extends State<HomeScreen> {
                                 return;
                               }
 
-                              // 2. Validar Nombre del Cliente
+                              // 2. Validar Marca, Modelo y Color obligatorios (sin valores por defecto quemados)
+                              if (marca.isEmpty ||
+                                  modelo.isEmpty ||
+                                  color.isEmpty ||
+                                  color.toUpperCase() == 'N/A') {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text(
+                                      '⚠️ Marca, Modelo y Color del vehículo son obligatorios.',
+                                    ),
+                                    backgroundColor: Colors.redAccent,
+                                    behavior: SnackBarBehavior.floating,
+                                  ),
+                                );
+                                return;
+                              }
+
+                              // 3. Validar Nombre del Cliente
                               if (nombreCli.isEmpty) {
                                 ScaffoldMessenger.of(context).showSnackBar(
                                   const SnackBar(
@@ -1626,7 +1746,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                 return;
                               }
 
-                              // 3. Validar Teléfono 0000-0000 y duplicados
+                              // 4. Validar Teléfono 0000-0000 y duplicados
                               if (!RegExp(r'^\d{4}-\d{4}$')
                                   .hasMatch(telefonoCli)) {
                                 ScaffoldMessenger.of(context).showSnackBar(
@@ -1641,29 +1761,31 @@ class _HomeScreenState extends State<HomeScreen> {
                                 return;
                               }
 
-                              for (final c in _listaClientesLocal) {
-                                final int cid =
-                                    int.tryParse(c['id']?.toString() ?? '0') ??
-                                        0;
-                                final String telC = _formatearTelefonoSV(
-                                  (c['telefono'] ?? '').toString(),
-                                );
-                                if (telC == telefonoCli &&
-                                    cid != (clienteIdExistente ?? -1)) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    SnackBar(
-                                      content: Text(
-                                        '⚠️ El teléfono $telefonoCli ya pertenece a otro cliente (${c['nombre_completo']}).',
-                                      ),
-                                      backgroundColor: Colors.redAccent,
-                                      behavior: SnackBarBehavior.floating,
-                                    ),
+                              if (telefonoCli != '0000-0000') {
+                                for (final c in _listaClientesLocal) {
+                                  final int cid = int.tryParse(
+                                          c['id']?.toString() ?? '0') ??
+                                      0;
+                                  final String telC = _formatearTelefonoSV(
+                                    (c['telefono'] ?? '').toString(),
                                   );
-                                  return;
+                                  if (telC == telefonoCli &&
+                                      cid != (clienteIdExistente ?? -1)) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(
+                                        content: Text(
+                                          '⚠️ El teléfono $telefonoCli ya pertenece a otro cliente (${c['nombre_completo']}).',
+                                        ),
+                                        backgroundColor: Colors.redAccent,
+                                        behavior: SnackBarBehavior.floating,
+                                      ),
+                                    );
+                                    return;
+                                  }
                                 }
                               }
 
-                              // 4. Validar Correo Electrónico (si se ingresó) y duplicados
+                              // 5. Validar Correo Electrónico (si se ingresó) y duplicados
                               if (correoCli.isNotEmpty) {
                                 if (!RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
                                     .hasMatch(correoCli)) {
@@ -1704,15 +1826,57 @@ class _HomeScreenState extends State<HomeScreen> {
                                 }
                               }
 
-                              final marca = marcaCtrl.text.trim().isEmpty
-                                  ? 'Toyota'
-                                  : marcaCtrl.text.trim();
-                              final modelo = modeloCtrl.text.trim().isEmpty
-                                  ? 'Corolla'
-                                  : modeloCtrl.text.trim();
-                              final color = colorCtrl.text.trim().isEmpty
-                                  ? 'Gris'
-                                  : colorCtrl.text.trim();
+                              // 6. Confirmación obligatoria en ventana 4:45 PM - 5:00 PM
+                              if (_enVentanaProrroga) {
+                                final bool? confProrroga =
+                                    await showDialog<bool>(
+                                  context: context,
+                                  builder: (ctx) => AlertDialog(
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(18),
+                                    ),
+                                    title: const Row(
+                                      children: [
+                                        Icon(Icons.schedule_rounded,
+                                            color: Color(0xFFD97706)),
+                                        SizedBox(width: 8),
+                                        Expanded(
+                                          child: Text(
+                                            'Programación para mañana',
+                                            style: TextStyle(
+                                              fontSize: 16,
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    content: const Text(
+                                      'Son entre las 4:45 PM y 5:00 PM. La orden se registrará pero quedará programada automáticamente para mañana a las 07:00 AM sin ocupar bahía hoy.\n\n¿Deseas continuar?',
+                                      style: TextStyle(fontSize: 13.5),
+                                    ),
+                                    actions: [
+                                      TextButton(
+                                        onPressed: () =>
+                                            Navigator.pop(ctx, false),
+                                        child: const Text('Cancelar'),
+                                      ),
+                                      ElevatedButton(
+                                        onPressed: () =>
+                                            Navigator.pop(ctx, true),
+                                        style: ElevatedButton.styleFrom(
+                                          backgroundColor:
+                                              const Color(0xFFD97706),
+                                          foregroundColor: Colors.white,
+                                        ),
+                                        child: const Text(
+                                            'Sí, programar para mañana'),
+                                      ),
+                                    ],
+                                  ),
+                                );
+                                if (confProrroga != true) return;
+                              }
 
                               final List<double> extrasPrecios = extras
                                   .where((e) => e.seleccionado)
@@ -1767,7 +1931,9 @@ class _HomeScreenState extends State<HomeScreen> {
                       label: Text(
                         ordenActivaPatio != null
                             ? 'Vehículo ya activo en ${ordenActivaPatio.bahia}'
-                            : 'Registrar en Bahía $bahiaLibre (Pendiente)',
+                            : _enVentanaProrroga
+                                ? 'Programar para Mañana 7:00 AM'
+                                : 'Registrar en Bahía $bahiaLibre (Pendiente)',
                         style: const TextStyle(fontWeight: FontWeight.bold),
                       ),
                     ),
@@ -1788,11 +1954,17 @@ class _HomeScreenState extends State<HomeScreen> {
       floatingActionButton: _selectedIndex == 0
           ? FloatingActionButton.extended(
               onPressed: _abrirModalRecepcion,
-              backgroundColor: AppColors.kRoyalBlue,
+              backgroundColor: _recepcionAbierta
+                  ? AppColors.kRoyalBlue
+                  : Colors.grey.shade600,
               foregroundColor: Colors.white,
-              icon: const Icon(Icons.add_rounded),
-              label: const Text('Recibir',
-                  style: TextStyle(fontWeight: FontWeight.bold)),
+              icon: Icon(_recepcionAbierta
+                  ? Icons.add_rounded
+                  : Icons.lock_clock_rounded),
+              label: Text(
+                _recepcionAbierta ? 'Recibir' : 'Cerrado (7AM-5PM)',
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
             )
           : null,
       body: SafeArea(
@@ -1862,7 +2034,8 @@ class _HomeScreenState extends State<HomeScreen> {
   // ─── PESTAÑA 0: PATIO ─────────────────────────────────────
 
   Widget _buildPantallaInicio() {
-    const totalBahias = AppConstants.totalBahias;
+    final int totalBahias =
+        _bahiasApi.isNotEmpty ? _bahiasApi.length : AppConstants.totalBahias;
     final ocupadas = List.generate(totalBahias, (i) => _bahiaOcupada(i + 1))
         .where((b) => b)
         .length;
@@ -1877,6 +2050,7 @@ class _HomeScreenState extends State<HomeScreen> {
       final q = _busqueda.toLowerCase();
       return v.placa.toLowerCase().contains(q) ||
           v.nombreCompletoCarro.toLowerCase().contains(q) ||
+          v.color.toLowerCase().contains(q) ||
           v.cliente.toLowerCase().contains(q);
     }).toList();
 
@@ -1921,7 +2095,7 @@ class _HomeScreenState extends State<HomeScreen> {
             TextField(
               onChanged: (valor) => setState(() => _busqueda = valor),
               decoration: InputDecoration(
-                hintText: 'Buscar vehículo por placa o cliente...',
+                hintText: 'Buscar vehículo por placa, color o cliente...',
                 hintStyle:
                     const TextStyle(color: AppColors.textHint, fontSize: 14),
                 prefixIcon: const Icon(Icons.search_rounded,
@@ -1962,9 +2136,11 @@ class _HomeScreenState extends State<HomeScreen> {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      const Text(
-                        'Estado de bahías (Turno Hoy)',
-                        style: TextStyle(
+                      Text(
+                        _horaSv.isNotEmpty
+                            ? 'Estado de bahías (Hoy • $_horaSv SV)'
+                            : 'Estado de bahías (Turno Hoy)',
+                        style: const TextStyle(
                           color: Colors.white70,
                           fontSize: 13.5,
                           fontWeight: FontWeight.w500,
@@ -2130,21 +2306,49 @@ class _HomeScreenState extends State<HomeScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      '${v.nombreCompletoCarro} • ${v.categoria}',
+                      '${v.nombreCompletoCarro} (${v.color}) • ${v.categoria}',
                       style: const TextStyle(
-                        fontSize: 15,
+                        fontSize: 14.5,
                         fontWeight: FontWeight.w700,
                         color: AppColors.textPrimary,
                       ),
                     ),
                     const SizedBox(height: 2),
-                    Text(
-                      '${v.bahia} • ${v.pagado ? "COBRADO EN CAJA" : "PENDIENTE EN CAJA"}',
-                      style: TextStyle(
-                        fontSize: 11.5,
-                        fontWeight: FontWeight.w700,
-                        color: v.pagado ? AppColors.success : AppColors.warning,
-                      ),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 4,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        Text(
+                          '${v.bahia} • ${v.pagado ? "COBRADO EN CAJA" : "PENDIENTE EN CAJA"}',
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w700,
+                            color: v.pagado
+                                ? AppColors.success
+                                : AppColors.warning,
+                          ),
+                        ),
+                        if (v.vecesPospuesta >= 1)
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFFEF3C7),
+                              borderRadius: BorderRadius.circular(6),
+                              border:
+                                  Border.all(color: const Color(0xFFF59E0B)),
+                            ),
+                            child: const Text(
+                              'POSPUESTA 1/1',
+                              style: TextStyle(
+                                fontSize: 9.5,
+                                fontWeight: FontWeight.w800,
+                                color: Color(0xFFB45309),
+                              ),
+                            ),
+                          ),
+                      ],
                     ),
                   ],
                 ),
@@ -2181,10 +2385,6 @@ class _HomeScreenState extends State<HomeScreen> {
           Row(
             children: List.generate(3, (i) {
               final bool activo = v.fase == i;
-              // Regla unidireccional:
-              // - Si fase == 0 (Pendiente): puede pasar a 1 (En proceso) o 2 (Terminado).
-              // - Si fase == 1 (En proceso): botón 0 (Pendiente) deshabilitado (onPressed: null), solo puede avanzar a 2.
-              // - Si fase == 2 (Terminado): botones 0 y 1 deshabilitados (onPressed: null).
               final bool deshabilitadoPorRetroceso = i < v.fase || v.fase == 2;
               final VoidCallback? accionBoton = deshabilitadoPorRetroceso
                   ? null
@@ -2222,6 +2422,29 @@ class _HomeScreenState extends State<HomeScreen> {
               );
             }),
           ),
+          // Botón para posponer orden Pendiente al día siguiente (máximo 1 vez)
+          if (v.fase == 0 && v.vecesPospuesta == 0) ...[
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: () => _confirmarPosponerOrden(v),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: const Color(0xFFB45309),
+                  side: const BorderSide(color: Color(0xFFF59E0B)),
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                ),
+                icon: const Icon(Icons.event_repeat_rounded, size: 16),
+                label: const Text(
+                  'Posponer a mañana (1 vez)',
+                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+                ),
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -2439,7 +2662,7 @@ class _HomeScreenState extends State<HomeScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  '${v.placa} • ${v.nombreCompletoCarro} (${v.categoria})',
+                  '${v.placa} • ${v.nombreCompletoCarro} (${v.color} • ${v.categoria})',
                   style: const TextStyle(
                     fontSize: 13.5,
                     fontWeight: FontWeight.w700,

@@ -9,6 +9,7 @@ import '../models/servicio_extra_model.dart';
 import '../screens/login_screen.dart';
 
 /// Servicio centralizado para todas las llamadas HTTP a la API FastAPI.
+/// Toda la información, catálogos, precios, bahías y operarios provienen 100% de la API REST.
 class ApiService {
   String _apiUrl;
 
@@ -77,6 +78,16 @@ class ApiService {
         dtSv.day == hoySv.day;
   }
 
+  /// Verifica si una fecha ISO corresponde a un día futuro (> hoy) en hora de El Salvador.
+  static bool esFechaFuturaSV(String? fechaStr) {
+    if (fechaStr == null || fechaStr.trim().isEmpty) return false;
+    final dtSv = fechaIsoASv(fechaStr);
+    final hoySv = ahoraSV();
+    final fechaOrden = DateTime(dtSv.year, dtSv.month, dtSv.day);
+    final fechaHoy = DateTime(hoySv.year, hoySv.month, hoySv.day);
+    return fechaOrden.isAfter(fechaHoy);
+  }
+
   /// Formatea una fecha ISO a texto legible en hora de El Salvador (YYYY-MM-DD HH:MM).
   static String formatearFechaHoraSV(String? fechaStr) {
     final dt = fechaIsoASv(fechaStr);
@@ -133,67 +144,21 @@ class ApiService {
 
   static String upperOrEmpty(String s) => s.trim().toUpperCase();
 
-  // ─── CATÁLOGOS Y TABLA 5.1 DEL TDR (RESPALDO Y DINÁMICO) ────
+  // ─── CATÁLOGOS DINÁMICOS 100% DESDE LA API ─────────────────
 
-  /// Nombre de categoría a partir de su ID según MySQL (routers/finanzas.py) y Tabla 5.1 del TDR.
-  static String nombreCategoria(int? catId) {
-    switch (catId) {
-      case 1:
-        return 'Carros Pequeños';
-      case 2:
-        return 'Carros Medianos';
-      case 3:
-        return 'Carros Grandes';
-      case 4:
-        return 'Carros Pick up/SUV';
-      case 5:
-        return 'Microbús';
-      case 6:
-        return 'Motocicletas';
-      default:
-        return 'Carros Pequeños';
+  /// Obtiene el nombre de una categoría consultando exclusivamente el catálogo de la API.
+  String obtenerNombreCategoria(int? catId) {
+    if (catId == null) return '';
+    for (final c in _categoriasCache) {
+      final int id = int.tryParse(c['id']?.toString() ?? '0') ?? 0;
+      if (id == catId) {
+        return (c['nombre'] ?? '').toString();
+      }
     }
+    return '';
   }
 
-  /// Precio base según categoría y servicio base según Tabla 5.1 del TDR.
-  /// 1: Carros Pequeños ($4.00), 2: Carros Medianos ($5.00), 3: Carros Grandes ($6.00),
-  /// 4: Carros Pick up/SUV ($8.00), 5: Microbús ($10.00), 6: Motocicletas ($3.00).
-  /// Servicio Base: 1=Lavado Básico (+$0), 2=Pasteado a Mano (+$1), 3=Pasteado a Máquina (+$2).
-  static double precioBaseCategoria(int catId, [int servicioBaseId = 1]) {
-    double base;
-    switch (catId) {
-      case 1:
-        base = 4.00; // Carros Pequeños ($4.00)
-        break;
-      case 2:
-        base = 5.00; // Carros Medianos ($5.00)
-        break;
-      case 3:
-        base = 6.00; // Carros Grandes ($6.00)
-        break;
-      case 4:
-        base = 8.00; // Carros Pick up/SUV ($8.00)
-        break;
-      case 5:
-        base = 10.00; // Microbús ($10.00)
-        break;
-      case 6:
-        base = 3.00; // Motocicletas ($3.00)
-        break;
-      default:
-        base = 4.00;
-    }
-
-    if (servicioBaseId == 2) {
-      base += 1.00; // Pasteado a Mano (+$1.00)
-    } else if (servicioBaseId == 3) {
-      base += 2.00; // Pasteado a Máquina (+$2.00)
-    }
-    return base;
-  }
-
-  /// Obtiene el precio exacto desde la matriz sincronizada (/servicios/matriz-precios)
-  /// o utiliza la Tabla 5.1 de respaldo si no existe combinación en la BD.
+  /// Obtiene el precio exacto desde la matriz sincronizada (GET /servicios/matriz-precios).
   double obtenerPrecioMatriz(int categoriaId, [int servicioBaseId = 1]) {
     for (final m in _matrizPreciosCache) {
       final int cId =
@@ -202,16 +167,16 @@ class ApiService {
           int.tryParse(m['servicio_base_id']?.toString() ?? '0') ?? 0;
       if (cId == categoriaId && sId == servicioBaseId) {
         final double? p = double.tryParse(m['precio_base']?.toString() ?? '');
-        if (p != null && p > 0) return p;
+        if (p != null) return p;
       }
     }
-    return precioBaseCategoria(categoriaId, servicioBaseId);
+    return 0.0;
   }
 
-  // ─── AUTENTICACIÓN Y CANDADO DE CUENTA INACTIVA ────────────
+  // ─── AUTENTICACIÓN, NIVELES DE SEGURIDAD Y CUENTA ACTIVA ──
 
   /// Inicia sesión y guarda token + usuario_id + datos de usuario.
-  /// Devuelve {'success': true} o {'success': false, 'error': detail}.
+  /// Valida rol operativo/supervisor o administrador y bloquea acceso si el rol es CAJERO.
   Future<Map<String, dynamic>> login(String email, String password) async {
     try {
       final url = Uri.parse('$_apiUrl/auth/login');
@@ -227,20 +192,70 @@ class ApiService {
 
       if (response.statusCode == 200) {
         final data = jsonDecode(rawBody);
+        final String rolStr = (data['rol'] ?? '').toString();
+        if (rolStr.toUpperCase().contains('CAJERO')) {
+          return {
+            'success': false,
+            'error':
+                'Acceso denegado: El personal de Caja debe ingresar desde el Sistema Web.',
+          };
+        }
+
+        final int userId =
+            int.tryParse(data['usuario_id']?.toString() ?? '0') ?? 0;
+        final String token = (data['access_token'] ?? '').toString();
+
+        // Verificar en /finanzas/usuarios que el usuario tenga estado == 1 y rol permitido
+        try {
+          final resUsers = await http.get(
+            Uri.parse('$_apiUrl/finanzas/usuarios'),
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': 'Bearer $token',
+            },
+          ).timeout(const Duration(seconds: 5));
+
+          if (resUsers.statusCode == 200) {
+            final List<dynamic> usuarios =
+                jsonDecode(utf8.decode(resUsers.bodyBytes));
+            for (final u in usuarios) {
+              final int uid = int.tryParse(u['id']?.toString() ?? '0') ?? 0;
+              if (uid == userId) {
+                final int est =
+                    int.tryParse(u['estado']?.toString() ?? '1') ?? 1;
+                final int rolId =
+                    int.tryParse(u['rol_id']?.toString() ?? '3') ?? 3;
+                if (est == 0) {
+                  return {
+                    'success': false,
+                    'error': 'Usuario inactivo. Contacte al administrador.',
+                  };
+                }
+                if (rolId == 2) {
+                  return {
+                    'success': false,
+                    'error':
+                        'Acceso denegado: El personal de Caja debe ingresar desde el Sistema Web.',
+                  };
+                }
+                break;
+              }
+            }
+          }
+        } catch (_) {}
+
         final prefs = await SharedPreferences.getInstance();
-        await prefs.setString(
-            AppConstants.tokenKey, data['access_token'] ?? '');
-        await prefs.setInt(AppConstants.userIdKey, data['usuario_id'] ?? 0);
+        await prefs.setString(AppConstants.tokenKey, token);
+        await prefs.setInt(AppConstants.userIdKey, userId);
         await prefs.setString(
             AppConstants.userNombreKey, data['nombre'] ?? 'Usuario');
-        await prefs.setString(
-            AppConstants.userRolKey, data['rol'] ?? 'Sin rol');
+        await prefs.setString(AppConstants.userRolKey, rolStr);
         await prefs.setString(AppConstants.userCorreoKey, email);
         return {
           'success': true,
-          'usuario_id': data['usuario_id'] ?? 0,
+          'usuario_id': userId,
           'nombre': data['nombre'] ?? 'Usuario',
-          'rol': data['rol'] ?? 'Sin rol',
+          'rol': rolStr,
         };
       }
 
@@ -261,9 +276,8 @@ class ApiService {
     }
   }
 
-  /// Consulta GET /finanzas/usuarios y verifica si el usuario_id guardado en SharedPreferences
-  /// tiene estado == 0. Si fue desactivado por el Administrador, ejecuta logout() y redirige
-  /// a LoginScreen mostrando un SnackBar rojo de alerta.
+  /// Consulta GET /finanzas/usuarios y verifica que el usuario tenga estado == 1
+  /// y que su rol no haya cambiado a Cajero (rol_id == 2).
   Future<bool> verificarUsuarioActivo([BuildContext? context]) async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -282,18 +296,21 @@ class ApiService {
           if (uid == userId) {
             final int estado =
                 int.tryParse(u['estado']?.toString() ?? '1') ?? 1;
-            if (estado == 0) {
+            final int rolId = int.tryParse(u['rol_id']?.toString() ?? '3') ?? 3;
+            if (estado == 0 || rolId == 2) {
               await logout();
               if (context != null && context.mounted) {
                 ScaffoldMessenger.of(context).clearSnackBars();
                 ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
+                  SnackBar(
                     content: Text(
-                      '⚠️ Tu sesión ha sido cerrada porque tu cuenta fue desactivada por el Administrador.',
+                      estado == 0
+                          ? '⚠️ Tu sesión ha sido cerrada porque tu cuenta fue desactivada por el Administrador.'
+                          : '⚠️ Tu sesión ha sido cerrada porque el rol de Cajero es exclusivo del Sistema Web.',
                     ),
                     backgroundColor: Colors.redAccent,
                     behavior: SnackBarBehavior.floating,
-                    duration: Duration(seconds: 5),
+                    duration: const Duration(seconds: 5),
                   ),
                 );
                 Navigator.of(context).pushAndRemoveUntil(
@@ -322,7 +339,7 @@ class ApiService {
 
   // ─── DATOS DEL PATIO Y DIRECTORIO LOCAL ──────────────────────
 
-  /// Auxiliar seguro para consultar listas JSON de la API sin bloquear si un endpoint secundario falla.
+  /// Auxiliar seguro para consultar listas JSON de la API.
   Future<List<dynamic>> _getListaSegura(
       String endpoint, Map<String, String> headers) async {
     try {
@@ -339,8 +356,24 @@ class ApiService {
     return [];
   }
 
-  /// Obtiene el directorio completo de clientes y vehículos registrados
-  /// para funcionar como caché local (memoria RAM) y autocompletado predictivo instantáneo.
+  /// Auxiliar seguro para consultar objetos JSON (Map) de la API.
+  Future<Map<String, dynamic>> _getMapaSeguro(
+      String endpoint, Map<String, String> headers) async {
+    try {
+      final res = await http
+          .get(Uri.parse('$_apiUrl$endpoint'), headers: headers)
+          .timeout(const Duration(seconds: 5));
+      if (res.statusCode == 200) {
+        final decoded = jsonDecode(utf8.decode(res.bodyBytes));
+        if (decoded is Map) return Map<String, dynamic>.from(decoded);
+      }
+    } catch (e) {
+      debugPrint('[ApiService] Advertencia consultando $endpoint: $e');
+    }
+    return {};
+  }
+
+  /// Obtiene el directorio completo de clientes y vehículos registrados.
   Future<Map<String, List<dynamic>>> obtenerDirectorio() async {
     try {
       final headers = await getHeaders();
@@ -373,11 +406,15 @@ class ApiService {
     };
   }
 
-  /// Obtiene todos los datos del patio, catálogos dinámicos, bahías, pagos, comisiones y operarios activos.
+  /// Obtiene todos los datos del patio, horario del servidor, catálogos dinámicos, bahías, pagos, comisiones y operarios activos.
   Future<Map<String, dynamic>> obtenerDatosPatio() async {
     final headers = await getHeaders();
     final prefs = await SharedPreferences.getInstance();
     final int currentUserId = prefs.getInt(AppConstants.userIdKey) ?? 0;
+
+    // 0. Inicializar datos base y consultar usuarios primero para garantizar catálogos y cliente comodín en MySQL
+    final usuariosInicial =
+        await _getListaSegura('/finanzas/usuarios', headers);
 
     final resOrdenes = await http
         .get(Uri.parse('$_apiUrl/ordenes/'), headers: headers)
@@ -395,7 +432,7 @@ class ApiService {
       return {'success': false, 'error': error};
     }
 
-    // Consultas dinámicas en paralelo para sincronización total con Backend y Web
+    // Consultas dinámicas en paralelo para sincronización 100% desde los endpoints de la API
     final secundarios = await Future.wait([
       _getListaSegura('/clientes/', headers), // 0
       _getListaSegura('/bahias/', headers), // 1
@@ -405,8 +442,29 @@ class ApiService {
       _getListaSegura('/servicios/adicionales', headers), // 5
       _getListaSegura('/finanzas/pagos', headers), // 6
       _getListaSegura('/finanzas/comisiones', headers), // 7
-      _getListaSegura('/finanzas/usuarios', headers), // 8
     ]);
+    final estadoHorarioMap =
+        await _getMapaSeguro('/ordenes/estado-horario', headers);
+
+    final ahoraLocal = ahoraSV();
+    final bool recepcionAbierta =
+        estadoHorarioMap.containsKey('recepcion_abierta')
+            ? (estadoHorarioMap['recepcion_abierta'] == true)
+            : (ahoraLocal.hour >= 7 && ahoraLocal.hour < 17);
+    final bool enVentanaProrroga =
+        estadoHorarioMap.containsKey('en_ventana_prorroga')
+            ? (estadoHorarioMap['en_ventana_prorroga'] == true)
+            : (ahoraLocal.hour == 16 && ahoraLocal.minute >= 45);
+    final String horaSvStr = (estadoHorarioMap['hora_sv'] ??
+            '${ahoraLocal.hour.toString().padLeft(2, '0')}:${ahoraLocal.minute.toString().padLeft(2, '0')}')
+        .toString();
+    final String mensajeHorario = (estadoHorarioMap['mensaje'] ??
+            (!recepcionAbierta
+                ? 'Recepción cerrada: Solo se permite registrar órdenes de 7:00 AM a 5:00 PM.'
+                : (enVentanaProrroga
+                    ? 'Aviso (4:45 PM - 5:00 PM): La orden se registrará pero aparecerá programada para el día siguiente.'
+                    : 'Recepción abierta (7:00 AM - 5:00 PM).')))
+        .toString();
 
     final List<dynamic> ordenesJson =
         jsonDecode(utf8.decode(resOrdenes.bodyBytes));
@@ -420,63 +478,38 @@ class ApiService {
     final List<dynamic> adicionalesJson = secundarios[5];
     final List<dynamic> pagosJson = secundarios[6];
     final List<dynamic> comisionesJson = secundarios[7];
-    final List<dynamic> usuariosJson = secundarios[8];
+    final List<dynamic> usuariosJson = usuariosInicial;
 
-    // Verificar si el usuario logueado fue desactivado (estado == 0)
+    // Verificar si el usuario logueado fue desactivado (estado == 0) o cambiado a Cajero (rol_id == 2)
     bool usuarioInactivo = false;
     if (currentUserId > 0 && usuariosJson.isNotEmpty) {
       for (final u in usuariosJson) {
         final int uid = int.tryParse(u['id']?.toString() ?? '0') ?? 0;
         if (uid == currentUserId) {
           final int est = int.tryParse(u['estado']?.toString() ?? '1') ?? 1;
-          if (est == 0) usuarioInactivo = true;
+          final int rolId = int.tryParse(u['rol_id']?.toString() ?? '3') ?? 3;
+          if (est == 0 || rolId == 2) usuarioInactivo = true;
           break;
         }
       }
     }
 
-    // Actualizar cachés de catálogos
-    if (categoriasJson.isNotEmpty) {
-      _categoriasCache = categoriasJson
-          .map((e) => Map<String, dynamic>.from(e as Map))
-          .toList();
-    } else {
-      _categoriasCache = [
-        {'id': 1, 'nombre': 'Carros Pequeños', 'comision_base': 2.50},
-        {'id': 2, 'nombre': 'Carros Medianos', 'comision_base': 2.50},
-        {'id': 3, 'nombre': 'Carros Grandes', 'comision_base': 4.00},
-        {'id': 4, 'nombre': 'Carros Pick up/SUV', 'comision_base': 4.00},
-        {'id': 5, 'nombre': 'Microbús', 'comision_base': 4.00},
-        {'id': 6, 'nombre': 'Motocicletas', 'comision_base': 1.50},
-      ];
-    }
+    // Actualizar cachés de catálogos exclusivamente desde los endpoints de la API (cero datos locales)
+    _categoriasCache =
+        categoriasJson.map((e) => Map<String, dynamic>.from(e as Map)).toList();
 
-    if (serviciosBaseJson.isNotEmpty) {
-      _serviciosBaseCache = serviciosBaseJson
-          .map((e) => Map<String, dynamic>.from(e as Map))
-          .toList();
-    } else {
-      _serviciosBaseCache = [
-        {'id': 1, 'nombre': 'Lavado Básico'},
-        {'id': 2, 'nombre': 'Pasteado a Mano'},
-        {'id': 3, 'nombre': 'Pasteado a Máquina'},
-      ];
-    }
+    _serviciosBaseCache = serviciosBaseJson
+        .map((e) => Map<String, dynamic>.from(e as Map))
+        .toList();
 
-    if (matrizPreciosJson.isNotEmpty) {
-      _matrizPreciosCache = matrizPreciosJson
-          .map((e) => Map<String, dynamic>.from(e as Map))
-          .toList();
-    }
+    _matrizPreciosCache = matrizPreciosJson
+        .map((e) => Map<String, dynamic>.from(e as Map))
+        .toList();
 
-    if (adicionalesJson.isNotEmpty) {
-      _serviciosAdicionalesCache = adicionalesJson
-          .map((e) =>
-              ServicioExtraModel.fromJson(Map<String, dynamic>.from(e as Map)))
-          .toList();
-    } else {
-      _serviciosAdicionalesCache = ServicioExtraModel.obtenerListaDefecto();
-    }
+    _serviciosAdicionalesCache = adicionalesJson
+        .map((e) =>
+            ServicioExtraModel.fromJson(Map<String, dynamic>.from(e as Map)))
+        .toList();
 
     // Mapas rápidos por ID
     final Map<int, Map<String, dynamic>> vehMap = {
@@ -497,7 +530,7 @@ class ApiService {
     final Map<int, String> usrNombreMap = {
       for (var u in usuariosJson)
         (int.tryParse(u['id']?.toString() ?? '0') ?? 0):
-            (u['nombre_completo'] ?? 'Operario').toString()
+            (u['nombre_completo'] ?? '').toString()
     };
     final Map<int, int> usrRolMap = {
       for (var u in usuariosJson)
@@ -557,6 +590,15 @@ class ApiService {
       final int oid = int.tryParse(o['id']?.toString() ?? '0') ?? 0;
       final int vid = int.tryParse(o['vehiculo_id']?.toString() ?? '0') ?? 0;
       final int bahiaId = int.tryParse(o['bahia_id']?.toString() ?? '1') ?? 1;
+      final int vecesPospuesta =
+          int.tryParse(o['veces_pospuesta']?.toString() ?? '0') ?? 0;
+
+      final String? createdAtStr = o['created_at']?.toString();
+
+      // Excluir órdenes programadas o pospuestas para mañana (fecha local SV > hoy)
+      if (esFechaFuturaSV(createdAtStr)) {
+        continue;
+      }
 
       final estadoStr = (o['estado'] ?? 'Pendiente').toString().toLowerCase();
       int fase = 0;
@@ -568,38 +610,30 @@ class ApiService {
         fase = 2;
       }
 
-      final String? createdAtStr = o['created_at']?.toString();
       final bool esDeHoy = esFechaDeHoySV(createdAtStr);
       final bool yaPagada = ordenesPagadas.contains(oid);
       final bool yaComisionada = ordenesComisionadasIds.contains(oid);
 
-      // Orden sigue abierta si está en lavado (Pendiente/En proceso) o pendiente de pago/comisión
-      final bool sigueAbierta =
-          (fase == 0 || fase == 1) || !yaPagada || !yaComisionada;
-
-      // Filtro operativo: solo órdenes de hoy más órdenes de días anteriores que sigan abiertas
-      if (!esDeHoy && !sigueAbierta && !pagosHoyOrdenIds.contains(oid)) {
+      // Filtro operativo estricto: mostrar únicamente las órdenes cuya fecha local en El Salvador sea HOY
+      if (!esDeHoy) {
         continue;
       }
 
       ordenesTurnoIds.add(oid);
       if (fase == 0 || fase == 1) {
         vehiculosEnPatio++;
-      } else if (fase == 2 &&
-          (esDeHoy || pagosHoyOrdenIds.contains(oid) || sigueAbierta)) {
-        if (esDeHoy) {
-          lavadosTerminadosHoy++;
-        }
+      } else if (fase == 2) {
+        lavadosTerminadosHoy++;
       }
 
       final veh = vehMap[vid] ?? {};
       final int catId =
           int.tryParse(veh['categoria_vehiculo_id']?.toString() ?? '1') ?? 1;
-      final cli = cliMap[veh['cliente_id']] ?? {};
-      final String catNombre =
-          (catNombreMap[catId] != null && catNombreMap[catId]!.isNotEmpty)
-              ? catNombreMap[catId]!
-              : nombreCategoria(catId);
+      final int clienteOrdenId = int.tryParse(
+              (o['cliente_id'] ?? veh['cliente_id'] ?? '0').toString()) ??
+          0;
+      final cli = cliMap[clienteOrdenId] ?? {};
+      final String catNombre = catNombreMap[catId] ?? '';
 
       final double total =
           double.tryParse((o['total_pagar'] ?? '0').toString()) ?? 0.0;
@@ -616,9 +650,9 @@ class ApiService {
           bahiaId: bahiaId,
           categoriaId: catId,
           placa: normalizarPlacaSV((veh['placa'] ?? 'SIN-PLACA').toString()),
-          marca: (veh['marca'] ?? 'Vehículo').toString(),
+          marca: (veh['marca'] ?? '').toString(),
           modelo: (veh['modelo'] ?? '').toString(),
-          color: (veh['color'] ?? 'N/A').toString(),
+          color: (veh['color'] ?? '').toString(),
           categoria: catNombre,
           cliente: (cli['nombre_completo'] ?? 'Cliente General').toString(),
           correoCliente: (cli['correo'] ?? '').toString(),
@@ -631,6 +665,7 @@ class ApiService {
           fechaHoraTexto: formatearFechaHoraSV(createdAtStr),
           operariosAsignados: ops.join(', '),
           comisionOrden: comisionTotalPorOrden[oid] ?? 0.0,
+          vecesPospuesta: vecesPospuesta,
           fase: fase,
           pagado: yaPagada,
           comisionada: yaComisionada,
@@ -689,6 +724,10 @@ class ApiService {
     return {
       'success': true,
       'usuarioInactivo': usuarioInactivo,
+      'recepcionAbierta': recepcionAbierta,
+      'enVentanaProrroga': enVentanaProrroga,
+      'horaSv': horaSvStr,
+      'mensajeHorario': mensajeHorario,
       'vehiculos': listaConstruida,
       'lavadosTerminadosHoy': lavadosTerminadosHoy,
       'vehiculosEnPatio': vehiculosEnPatio,
@@ -725,28 +764,53 @@ class ApiService {
     return response.statusCode == 200;
   }
 
+  /// Pospone una orden Pendiente para el día siguiente a las 7:00 AM (máximo 1 vez).
+  Future<Map<String, dynamic>> posponerOrden(int ordenId) async {
+    try {
+      final headers = await getHeaders();
+      final res = await http
+          .post(
+            Uri.parse('$_apiUrl/ordenes/$ordenId/posponer'),
+            headers: headers,
+          )
+          .timeout(const Duration(seconds: 6));
+
+      if (res.statusCode == 200) {
+        return {'success': true};
+      }
+
+      String error = 'No se pudo posponer la orden';
+      try {
+        final body = jsonDecode(utf8.decode(res.bodyBytes));
+        if (body['detail'] != null) error = body['detail'].toString();
+      } catch (_) {}
+      return {'success': false, 'error': error};
+    } catch (e) {
+      return {'success': false, 'error': 'Error de conexión: $e'};
+    }
+  }
+
   /// Asigna 1 o varios operarios a una orden terminada para cálculo y cierre de comisión.
   Future<Map<String, dynamic>> asignarOperarios({
     required int ordenId,
-    List<int>? operariosIds,
-    bool dosOperarios = false,
+    required List<int> operariosIds,
   }) async {
     try {
-      final headers = await getHeaders();
-      final List<int> idsEnviar =
-          (operariosIds != null && operariosIds.isNotEmpty)
-              ? operariosIds
-              : (dosOperarios
-                  ? AppConstants.operarioDoble
-                  : AppConstants.operarioSimple);
+      if (operariosIds.isEmpty) {
+        return {
+          'success': false,
+          'error': 'Debe seleccionar al menos un operario activo.',
+        };
+      }
 
+      final headers = await getHeaders();
       final res = await http
           .post(
             Uri.parse('$_apiUrl/finanzas/asignar-operarios'),
             headers: headers,
             body: jsonEncode({
               'orden_id': ordenId,
-              'operarios_ids': idsEnviar,
+              'operarios_ids': operariosIds,
               'comision_extra_manual': 0.0,
             }),
           )
@@ -813,6 +877,9 @@ class ApiService {
     String? correo,
   }) async {
     try {
+      if (nombre != null && nombre.toUpperCase().contains('CONSUMIDOR FINAL')) {
+        return;
+      }
       final headers = await getHeaders();
       final Map<String, dynamic> body = {};
       if (nombre != null && nombre.trim().isNotEmpty) {
@@ -839,9 +906,10 @@ class ApiService {
     }
   }
 
-  /// Actualiza categoría, marca, modelo y color de un vehículo existente vía PATCH.
+  /// Actualiza categoría, marca, modelo, color y último cliente de un vehículo existente vía PATCH.
   Future<void> actualizarVehiculoParcial({
     required int vehiculoId,
+    int? clienteId,
     required int categoriaId,
     required String marca,
     required String modelo,
@@ -849,16 +917,20 @@ class ApiService {
   }) async {
     try {
       final headers = await getHeaders();
+      final Map<String, dynamic> body = {
+        'categoria_vehiculo_id': categoriaId,
+        'marca': marca.trim(),
+        'modelo': modelo.trim(),
+        'color': color.trim(),
+      };
+      if (clienteId != null && clienteId > 0) {
+        body['cliente_id'] = clienteId;
+      }
       await http
           .patch(
             Uri.parse('$_apiUrl/vehiculos/$vehiculoId'),
             headers: headers,
-            body: jsonEncode({
-              'categoria_vehiculo_id': categoriaId,
-              'marca': marca,
-              'modelo': modelo,
-              'color': color,
-            }),
+            body: jsonEncode(body),
           )
           .timeout(const Duration(seconds: 5));
     } catch (e) {
@@ -884,9 +956,9 @@ class ApiService {
         'cliente_id': clienteId,
         'categoria_vehiculo_id': categoriaId,
         'placa': normalizarPlacaSV(placa),
-        'marca': marca,
-        'modelo': modelo,
-        'color': color,
+        'marca': marca.trim(),
+        'modelo': modelo.trim(),
+        'color': color.trim(),
       }),
     );
 
@@ -903,25 +975,35 @@ class ApiService {
     return {'success': false, 'error': error};
   }
 
-  /// Crea una orden de lavado con bahía específica.
+  /// Crea una orden de lavado enviando vehiculo_id, cliente_id y bahia_id.
   Future<Map<String, dynamic>> crearOrden({
     required int vehiculoId,
+    int? clienteId,
     required int bahiaId,
   }) async {
     final headers = await getHeaders();
+    final Map<String, dynamic> body = {
+      'vehiculo_id': vehiculoId,
+      'bahia_id': bahiaId,
+      'estado': 'Pendiente',
+    };
+    if (clienteId != null && clienteId > 0) {
+      body['cliente_id'] = clienteId;
+    }
+
     final res = await http.post(
       Uri.parse('$_apiUrl/ordenes/'),
       headers: headers,
-      body: jsonEncode({
-        'vehiculo_id': vehiculoId,
-        'bahia_id': bahiaId,
-        'estado': 'Pendiente',
-      }),
+      body: jsonEncode(body),
     );
 
     if (res.statusCode == 200) {
-      final id = jsonDecode(utf8.decode(res.bodyBytes))['id'];
-      return {'success': true, 'id': id};
+      final decoded = jsonDecode(utf8.decode(res.bodyBytes));
+      return {
+        'success': true,
+        'id': decoded['id'],
+        'veces_pospuesta': decoded['veces_pospuesta'] ?? 0,
+      };
     }
 
     String error = 'Error al crear orden';
@@ -933,6 +1015,7 @@ class ApiService {
   }
 
   /// Registra un servicio base y/o servicio adicional en /detalles-orden/.
+  /// El backend recalcula automáticamente subtotal, IVA 13% y total_pagar.
   Future<bool> agregarDetalleOrden({
     required int ordenId,
     int? servicioBaseId,
@@ -960,28 +1043,9 @@ class ApiService {
     }
   }
 
-  /// Actualiza los totales de una orden vía PATCH.
-  Future<bool> actualizarTotalesOrden({
-    required int ordenId,
-    required double subtotal,
-    required double impuestos,
-    required double totalPagar,
-  }) async {
-    final headers = await getHeaders();
-    final res = await http.patch(
-      Uri.parse('$_apiUrl/ordenes/$ordenId'),
-      headers: headers,
-      body: jsonEncode({
-        'subtotal': subtotal,
-        'impuestos': impuestos,
-        'total_pagar': totalPagar,
-      }),
-    );
-    return res.statusCode == 200;
-  }
-
-  /// Flujo condicional inteligente de recepción de vehículo en el patio.
-  /// Registra el servicio base (Tabla 5.1) + extras en /detalles-orden/ y calcula IVA 13%.
+  /// Flujo de recepción de vehículo en el patio 100% respaldado por la API:
+  /// Soporta cliente existente, Consumidor Final o nueva persona autorizada por orden,
+  /// conserva el propietario titular del vehículo si ya existe, y delega el cálculo de IVA 13% a /detalles-orden/.
   Future<Map<String, dynamic>> recibirVehiculo({
     int? clienteIdExistente,
     int? vehiculoIdExistente,
@@ -999,58 +1063,43 @@ class ApiService {
     List<int> extrasIds = const [],
   }) async {
     try {
+      int targetClienteId;
       int targetVehiculoId;
       final String placaNormalizada = normalizarPlacaSV(placa);
 
-      // 1. Si vehiculoIdExistente no es nulo: actualiza sus datos (categoría, marca, modelo, color) y sincroniza cliente
-      if (vehiculoIdExistente != null) {
-        targetVehiculoId = vehiculoIdExistente;
-        await actualizarVehiculoParcial(
-          vehiculoId: vehiculoIdExistente,
-          categoriaId: categoriaId,
-          marca: marca,
-          modelo: modelo,
-          color: color,
-        );
-        if (clienteIdExistente != null) {
-          await actualizarClienteParcial(
-            clienteId: clienteIdExistente,
-            nombre: nombreCliente,
-            telefono: telefonoCliente,
-            correo: correoCliente,
-          );
-        }
-      }
-      // 2. Si clienteIdExistente no es nulo pero el vehículo es nuevo
-      else if (clienteIdExistente != null) {
+      // 1. Resolver el cliente o persona autorizada para esta orden
+      if (clienteIdExistente != null && clienteIdExistente > 0) {
+        targetClienteId = clienteIdExistente;
         await actualizarClienteParcial(
           clienteId: clienteIdExistente,
           nombre: nombreCliente,
           telefono: telefonoCliente,
           correo: correoCliente,
         );
-        final resVeh = await crearVehiculo(
-          clienteId: clienteIdExistente,
-          categoriaId: categoriaId,
-          placa: placaNormalizada,
-          marca: marca,
-          modelo: modelo,
-          color: color,
-        );
-        if (resVeh['success'] != true) return resVeh;
-        targetVehiculoId = resVeh['id'];
-      }
-      // 3. Si ambos son nulos: Crear Cliente -> Crear Vehículo
-      else {
+      } else {
         final resCli = await crearCliente(
           nombreCliente,
           telefonoCliente,
           correoCliente,
         );
         if (resCli['success'] != true) return resCli;
+        targetClienteId = resCli['id'];
+      }
 
+      // 2. Resolver el vehículo (si ya existe, actualizar datos técnicos y último cliente que lo lavó)
+      if (vehiculoIdExistente != null && vehiculoIdExistente > 0) {
+        targetVehiculoId = vehiculoIdExistente;
+        await actualizarVehiculoParcial(
+          vehiculoId: vehiculoIdExistente,
+          clienteId: targetClienteId,
+          categoriaId: categoriaId,
+          marca: marca,
+          modelo: modelo,
+          color: color,
+        );
+      } else {
         final resVeh = await crearVehiculo(
-          clienteId: resCli['id'],
+          clienteId: targetClienteId,
           categoriaId: categoriaId,
           placa: placaNormalizada,
           marca: marca,
@@ -1061,22 +1110,23 @@ class ApiService {
         targetVehiculoId = resVeh['id'];
       }
 
-      // Crear la orden en estado Pendiente
+      // 3. Crear la orden enviando cliente_id para esta orden específica
       final resOrd = await crearOrden(
         vehiculoId: targetVehiculoId,
+        clienteId: targetClienteId,
         bahiaId: bahiaId,
       );
       if (resOrd['success'] != true) return resOrd;
 
       final int ordenId = resOrd['id'];
 
-      // 1. Registrar primero el servicio base seleccionado en POST /detalles-orden/
+      // 4. Registrar el servicio base en POST /detalles-orden/ (la API calcula subtotal, IVA 13% y total_pagar)
       await agregarDetalleOrden(
         ordenId: ordenId,
         servicioBaseId: servicioBaseId,
       );
 
-      // 2. Registrar cada servicio adicional seleccionado en POST /detalles-orden/
+      // 5. Registrar cada servicio adicional en POST /detalles-orden/
       for (final extraId in extrasIds) {
         await agregarDetalleOrden(
           ordenId: ordenId,
@@ -1084,32 +1134,17 @@ class ApiService {
         );
       }
 
-      // 3. Calcular subtotal sumando el precio de la matriz (según categoriaId + servicioBaseId) + extras
-      final double precioBase =
-          obtenerPrecioMatriz(categoriaId, servicioBaseId);
-      final double sumaExtras = extras.fold(0.0, (acc, e) => acc + e);
-      final double subtotal =
-          double.parse((precioBase + sumaExtras).toStringAsFixed(2));
-      final double impuestos =
-          double.parse((subtotal * 0.13).toStringAsFixed(2));
-      final double totalPagar =
-          double.parse((subtotal + impuestos).toStringAsFixed(2));
-
-      // Actualizar la orden con PATCH /ordenes/{id}
-      await actualizarTotalesOrden(
-        ordenId: ordenId,
-        subtotal: subtotal,
-        impuestos: impuestos,
-        totalPagar: totalPagar,
-      );
-
-      return {'success': true, 'orden_id': ordenId};
+      return {
+        'success': true,
+        'orden_id': ordenId,
+        'programada_manana': (resOrd['veces_pospuesta'] ?? 0) >= 1,
+      };
     } catch (e) {
       return {'success': false, 'error': 'Error de conexión: $e'};
     }
   }
 
-  // ─── INVENTARIO Y MOVIMIENTOS DE INSUMOS ────────────────────
+  // ─── INVENTARIO (CONSULTA EN TIEMPO REAL) ───────────────────
 
   /// Obtiene la lista completa de insumos del inventario desde el VPS.
   Future<List<InventarioModel>> obtenerInventario() async {
@@ -1131,61 +1166,6 @@ class ApiService {
         if (body['detail'] != null) errorMsg = body['detail'].toString();
       } catch (_) {}
       throw Exception(errorMsg);
-    }
-  }
-
-  /// Obtiene el historial de movimientos de inventario (GET /inventario/movimientos).
-  Future<List<Map<String, dynamic>>> obtenerMovimientosInventario() async {
-    try {
-      final headers = await getHeaders();
-      final list = await _getListaSegura('/inventario/movimientos', headers);
-      return list.map((e) => Map<String, dynamic>.from(e as Map)).toList();
-    } catch (_) {
-      return [];
-    }
-  }
-
-  /// Registra una salida/retiro de insumo desde el patio (POST /inventario/movimiento).
-  Future<Map<String, dynamic>> registrarMovimientoInventario({
-    required int inventarioId,
-    required int cantidad,
-    String tipoMovimiento = 'Salida',
-    String? descripcion,
-  }) async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final int userId = prefs.getInt(AppConstants.userIdKey) ?? 3;
-      final headers = await getHeaders();
-
-      final res = await http
-          .post(
-            Uri.parse('$_apiUrl/inventario/movimiento'),
-            headers: headers,
-            body: jsonEncode({
-              'inventario_id': inventarioId,
-              'usuario_id': userId > 0 ? userId : 3,
-              'tipo_movimiento': tipoMovimiento,
-              'cantidad': cantidad,
-              'descripcion':
-                  (descripcion != null && descripcion.trim().isNotEmpty)
-                      ? descripcion.trim()
-                      : 'Retiro operativo en patio (App Móvil)',
-            }),
-          )
-          .timeout(const Duration(seconds: 6));
-
-      if (res.statusCode == 200) {
-        return {'success': true};
-      }
-
-      String error = 'No se pudo registrar el movimiento';
-      try {
-        final body = jsonDecode(utf8.decode(res.bodyBytes));
-        if (body['detail'] != null) error = body['detail'].toString();
-      } catch (_) {}
-      return {'success': false, 'error': error};
-    } catch (e) {
-      return {'success': false, 'error': 'Error de conexión: $e'};
     }
   }
 }

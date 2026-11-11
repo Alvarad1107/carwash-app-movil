@@ -13,10 +13,8 @@ class LoginScreen extends StatefulWidget {
 class _LoginScreenState extends State<LoginScreen> {
   final _apiService = ApiService();
 
-  final TextEditingController _emailCtrl =
-      TextEditingController(text: 'erick.herrera@sprintwash.local');
-  final TextEditingController _passCtrl =
-      TextEditingController(text: 'hash_demo_123');
+  final TextEditingController _emailCtrl = TextEditingController();
+  final TextEditingController _passCtrl = TextEditingController();
 
   bool _ocultarPassword = true;
   bool _isLoading = false;
@@ -164,6 +162,11 @@ class _LoginScreenState extends State<LoginScreen> {
                 controller: _emailCtrl,
                 keyboardType: TextInputType.emailAddress,
                 decoration: InputDecoration(
+                  hintText: 'usuario@sprintwash.local',
+                  hintStyle: const TextStyle(
+                    color: AppColors.textMuted,
+                    fontSize: 13.5,
+                  ),
                   prefixIcon: const Icon(
                     Icons.mail_outline_rounded,
                     color: AppColors.textMuted,
@@ -199,6 +202,11 @@ class _LoginScreenState extends State<LoginScreen> {
                 controller: _passCtrl,
                 obscureText: _ocultarPassword,
                 decoration: InputDecoration(
+                  hintText: 'Ingresa tu contraseña',
+                  hintStyle: const TextStyle(
+                    color: AppColors.textMuted,
+                    fontSize: 13.5,
+                  ),
                   prefixIcon: const Icon(
                     Icons.lock_outline_rounded,
                     color: AppColors.textMuted,

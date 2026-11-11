@@ -53,9 +53,4 @@ class AppConstants {
 
   // Total de bahías en el patio
   static const int totalBahias = 6;
-
-  // IDs para roles/asignaciones
-  static const int cajeroIdDefault = 2;
-  static const List<int> operarioSimple = [3];
-  static const List<int> operarioDoble = [3, 4];
 }
