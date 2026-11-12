@@ -601,6 +601,9 @@ class ApiService {
       }
 
       final estadoStr = (o['estado'] ?? 'Pendiente').toString().toLowerCase();
+      if (estadoStr.contains('cancelad')) {
+        continue;
+      }
       int fase = 0;
       if (estadoStr.contains('proceso')) fase = 1;
       if (estadoStr.contains('listo') ||
@@ -780,6 +783,32 @@ class ApiService {
       }
 
       String error = 'No se pudo posponer la orden';
+      try {
+        final body = jsonDecode(utf8.decode(res.bodyBytes));
+        if (body['detail'] != null) error = body['detail'].toString();
+      } catch (_) {}
+      return {'success': false, 'error': error};
+    } catch (e) {
+      return {'success': false, 'error': 'Error de conexión: $e'};
+    }
+  }
+
+  /// Cancela una orden en estado Pendiente y libera su bahía.
+  Future<Map<String, dynamic>> cancelarOrden(int ordenId) async {
+    try {
+      final headers = await getHeaders();
+      final res = await http
+          .post(
+            Uri.parse('$_apiUrl/ordenes/$ordenId/cancelar'),
+            headers: headers,
+          )
+          .timeout(const Duration(seconds: 6));
+
+      if (res.statusCode == 200) {
+        return {'success': true};
+      }
+
+      String error = 'No se pudo cancelar la orden';
       try {
         final body = jsonDecode(utf8.decode(res.bodyBytes));
         if (body['detail'] != null) error = body['detail'].toString();

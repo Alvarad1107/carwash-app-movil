@@ -261,10 +261,10 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   /// Muestra el AlertDialog de confirmación obligatoria (TDR 4.1 y 4.4)
-  /// antes de avanzar el estado de la orden de forma unidireccional.
+  /// antes de avanzar el estado de la orden de forma unidireccional (0 -> 1 -> 2).
   Future<void> _confirmarCambioEstado(VehiculoPatio v, int nuevaFase) async {
-    // Regla de flujo unidireccional estricto: prohibido retroceder estados
-    if (nuevaFase <= v.fase) return;
+    // Regla de flujo secuencial estricto de un paso a la vez
+    if (nuevaFase != v.fase + 1) return;
 
     final String titulo = nuevaFase == 1
         ? 'Confirmar inicio de lavado'
@@ -325,7 +325,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _cambiarEstado(VehiculoPatio v, int nuevaFase) async {
-    if (nuevaFase <= v.fase) return;
+    if (nuevaFase != v.fase + 1) return;
     try {
       final success = await _apiService.cambiarEstadoOrden(
         v.ordenId,
@@ -427,6 +427,85 @@ class _HomeScreenState extends State<HomeScreen> {
           behavior: SnackBarBehavior.floating,
           content: Text(
             'Orden #${v.ordenId} (${v.placa}) pospuesta para mañana a las 7:00 AM. ${v.bahia} liberada hoy.',
+            style: const TextStyle(fontWeight: FontWeight.bold),
+          ),
+        ),
+      );
+      await _obtenerDatosDeApi();
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          backgroundColor: Colors.redAccent,
+          behavior: SnackBarBehavior.floating,
+          content: Text('Error: ${res['error']}'),
+        ),
+      );
+    }
+  }
+
+  /// Cancela una orden en estado Pendiente y libera su bahía física hoy.
+  Future<void> _confirmarCancelarOrden(VehiculoPatio v) async {
+    if (v.fase != 0) return;
+
+    final bool? confirmar = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+        title: const Row(
+          children: [
+            Icon(Icons.cancel_rounded, color: Color(0xFFDC2626)),
+            SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'Cancelar orden de lavado',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              ),
+            ),
+          ],
+        ),
+        content: Text(
+          '¿Cancelar la orden #${v.ordenId} (${v.placa})?\n\n'
+          '• Se liberará la ${v.bahia} inmediatamente.\n'
+          '• Solo se permite cancelar órdenes en estado Pendiente.\n'
+          '• Esta acción es irreversible.',
+          style: const TextStyle(
+            fontSize: 13.5,
+            color: AppColors.textSecondary,
+            height: 1.4,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Volver'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFDC2626),
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10)),
+            ),
+            child: const Text('Sí, cancelar orden'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmar != true) return;
+
+    final res = await _apiService.cancelarOrden(v.ordenId);
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).clearSnackBars();
+    if (res['success'] == true) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          backgroundColor: const Color(0xFFDC2626),
+          behavior: SnackBarBehavior.floating,
+          content: Text(
+            'Orden #${v.ordenId} (${v.placa}) cancelada correctamente. ${v.bahia} liberada.',
             style: const TextStyle(fontWeight: FontWeight.bold),
           ),
         ),
@@ -2397,10 +2476,10 @@ class _HomeScreenState extends State<HomeScreen> {
           Row(
             children: List.generate(3, (i) {
               final bool activo = v.fase == i;
-              final bool deshabilitadoPorRetroceso = i < v.fase || v.fase == 2;
-              final VoidCallback? accionBoton = deshabilitadoPorRetroceso
-                  ? null
-                  : (activo ? null : () => _confirmarCambioEstado(v, i));
+              final bool puedeAvanzar = i == v.fase + 1;
+              final VoidCallback? accionBoton = puedeAvanzar
+                  ? () => _confirmarCambioEstado(v, i)
+                  : null;
 
               return Expanded(
                 child: Padding(
@@ -2434,27 +2513,53 @@ class _HomeScreenState extends State<HomeScreen> {
               );
             }),
           ),
-          // Botón para posponer orden Pendiente al día siguiente (máximo 1 vez)
-          if (v.fase == 0 && v.vecesPospuesta == 0) ...[
+          // Acciones de orden Pendiente: Posponer a mañana (1 vez) y Cancelar orden
+          if (v.fase == 0) ...[
             const SizedBox(height: 8),
-            SizedBox(
-              width: double.infinity,
-              child: OutlinedButton.icon(
-                onPressed: () => _confirmarPosponerOrden(v),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: const Color(0xFFB45309),
-                  side: const BorderSide(color: Color(0xFFF59E0B)),
-                  padding: const EdgeInsets.symmetric(vertical: 8),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(10),
+            Row(
+              children: [
+                if (v.vecesPospuesta == 0) ...[
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () => _confirmarPosponerOrden(v),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: const Color(0xFFB45309),
+                        side: const BorderSide(color: Color(0xFFF59E0B)),
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                      ),
+                      icon: const Icon(Icons.event_repeat_rounded, size: 15),
+                      label: const Text(
+                        'Posponer a mañana (1 vez)',
+                        style: TextStyle(
+                            fontSize: 11.5, fontWeight: FontWeight.w700),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                ],
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () => _confirmarCancelarOrden(v),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: const Color(0xFFDC2626),
+                      side: const BorderSide(color: Color(0xFFEF4444)),
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                    ),
+                    icon: const Icon(Icons.cancel_outlined, size: 15),
+                    label: const Text(
+                      'Cancelar orden',
+                      style: TextStyle(
+                          fontSize: 11.5, fontWeight: FontWeight.w700),
+                    ),
                   ),
                 ),
-                icon: const Icon(Icons.event_repeat_rounded, size: 16),
-                label: const Text(
-                  'Posponer a mañana (1 vez)',
-                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
-                ),
-              ),
+              ],
             ),
           ],
         ],
